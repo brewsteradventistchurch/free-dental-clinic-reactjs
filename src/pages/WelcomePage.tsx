@@ -15,7 +15,7 @@ export default function WelcomePage() {
       <div className="login-card">
         <div className="login-mark">+</div>
 
-        <span className="eyebrow">Brewster Adventist Church</span>
+        <span className="eyebrow">Omak Adventist Church</span>
 
         <h1>Free Dental Clinic</h1>
 
@@ -31,11 +31,6 @@ export default function WelcomePage() {
         <p className="login-note">
           Authorized clinic volunteers only.
         </p>
-
-        <div className="prototype-note">
-          Prototype login — Google authentication will be connected to the
-          backend later.
-        </div>
       </div>
     </main>
   );

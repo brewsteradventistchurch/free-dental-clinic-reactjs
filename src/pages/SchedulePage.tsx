@@ -1,8 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import {
-  patients,
-} from "../schedule/mockScheduleData";
 import { getScheduleStore, saveScheduleStore } from "../schedule/scheduleStore";
 import type { Appointment, Provider } from "../schedule/types";
 import "./SchedulePage.css";
@@ -66,10 +63,12 @@ function getInitialDate(): string {
 }
 
 function getPatientName(patientId: string): string {
-  const patient = patients.find((item) => item.id === patientId);
+  const schedPatient = getScheduleStore().patients.find(
+    (patient) => patient.id === patientId,
+  );
 
-  return patient
-    ? `${patient.firstName} ${patient.lastName}`
+  return schedPatient
+    ? `${schedPatient.firstName} ${schedPatient.lastName}`
     : "Unknown patient";
 }
 
@@ -131,12 +130,14 @@ function hasService(provider: Provider, serviceId: string): boolean {
 export default function SchedulePage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const schedulingPatientId = searchParams.get("patientId");
+
+  const [scheduleData] = useState(getScheduleStore);
+  const patients = scheduleData.patients;
+  const [selectedDate, setSelectedDate] = useState(getInitialDate);
   const schedulingPatient = patients.find(
     (patient) => patient.id === schedulingPatientId,
   );
 
-  const [scheduleData] = useState(getScheduleStore);
-  const [selectedDate, setSelectedDate] = useState(getInitialDate);
   const [scheduleAppointments, setScheduleAppointments] =
     useState<Appointment[]>(() => scheduleData.appointments);
 
@@ -1021,7 +1022,7 @@ export default function SchedulePage() {
                   Select patient...
                 </option>
 
-                {patients.map((patient) => (
+                {getScheduleStore().patients.map((patient) => (
                   <option value={patient.id} key={patient.id}>
                     {patient.firstName} {patient.lastName}
                   </option>

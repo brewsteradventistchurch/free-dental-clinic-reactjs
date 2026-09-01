@@ -20,10 +20,60 @@ export type ProviderAvailability = {
   endMinutes: number;
 };
 
+export type BookingStatus = string;
+
+export type RequestSource = string;
+
+export type FollowUpInterest = string;
+
+export type PatientNoteLog = {
+  id: string;
+  note: string;
+  createdAt: string;
+  volunteerId: string;
+  volunteerName: string;
+};
+
 export type Patient = {
   id: string;
+  patientNumber: string;
+
   firstName: string;
   lastName: string;
+  dateOfBirth?: string;
+
+  email?: string;
+  cellPhone: string;
+  alternatePhone?: string;
+
+  preferredLanguage: string;
+  needsTranslator: boolean;
+
+  streetAddress?: string;
+  streetCity?: string;
+  streetState?: string;
+  streetZip?: string;
+
+  mailingAddress?: string;
+  mailingCity?: string;
+  mailingState?: string;
+  mailingZip?: string;
+
+  spouseOrParentName?: string;
+  referral?: string;
+
+  bookingStatus: BookingStatus;
+  sourceOfRequest: RequestSource;
+  requestDate: string;
+
+  serviceRequested?: string;
+
+  followUpInterests: FollowUpInterest[];
+
+  noteLogs: PatientNoteLog[];
+
+  // createdAt: string;
+  // updatedAt: string;
 };
 
 export type Appointment = {

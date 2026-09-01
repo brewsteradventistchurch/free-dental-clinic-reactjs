@@ -140,16 +140,6 @@ a {
   font-size: 13px;
 }
 
-.prototype-note {
-  margin-top: 28px;
-  padding: 12px;
-  border-radius: 8px;
-  background: #f4f6f5;
-  color: #69736e;
-  font-size: 12px;
-  line-height: 1.5;
-}
-
 /* Application shell */
 
 .app-shell {
