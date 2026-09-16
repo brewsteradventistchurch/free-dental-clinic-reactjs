@@ -107,7 +107,7 @@
 .schedule-grid {
   display: grid;
   grid-template-columns: 82px repeat(
-    var(--provider-count),
+    var(--service-area-count),
     minmax(180px, 1fr)
   );
   grid-template-rows: auto auto;
@@ -126,7 +126,7 @@
   background: white;
 }
 
-.provider-header {
+.service-area-header {
   grid-row: 1;
   position: sticky;
   top: 0;
@@ -139,30 +139,36 @@
   box-shadow: 0 1px 3px rgb(25 45 35 / 6%);
 }
 
-.provider-header strong {
+.service-area-header strong {
   display: block;
   color: #26352d;
   font-size: 0.95rem;
 }
 
-.provider-services {
+.service-area-provider {
+  margin-top: 5px;
+  color: #758078;
+  font-size: 0.73rem;
+}
+
+.service-area-services {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
   margin-top: 8px;
 }
 
-.provider-service {
+.service-area-service {
   color: #758078;
   font-size: 0.73rem;
 }
 
-.provider-service:not(:last-child)::after {
+.service-area-service:not(:last-child)::after {
   content: " • ";
   margin-left: 5px;
 }
 
-.provider-service.primary {
+.service-area-service.primary {
   color: var(--green);
   font-weight: 800;
   text-transform: uppercase;
@@ -187,7 +193,7 @@
   text-align: right;
 }
 
-.provider-column {
+.service-area-column {
   grid-row: 2;
   position: relative;
   min-width: 0;
@@ -247,6 +253,17 @@
 .appointment-card:active,
 .appointment-card.dragging {
   cursor: grabbing;
+}
+
+.appointment-card.dragging {
+  opacity: 0.72;
+}
+
+.appointment-card.drag-preview {
+  z-index: 15;
+  pointer-events: none;
+  opacity: 0.72;
+  box-shadow: 0 3px 9px rgb(30 50 38 / 18%);
 }
 
 .appointment-resize-handle {
@@ -393,7 +410,7 @@
 }
 
 .schedule-form-error {
-  margin: -4px 0 0;
+  margin: -4px 0 16px;
   padding: 10px 12px;
   border: 1px solid #fecaca;
   border-radius: 8px;
@@ -419,20 +436,6 @@
   transform: translateX(-50%);
 }
 
-@media (max-width: 900px) {
-  .schedule-header {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .schedule-controls {
-    width: 100%;
-  }
-
-  .date-picker {
-    flex: 1;
-  }
-}
 .schedule-patient-context {
   margin: 0 0 18px;
   padding: 12px 14px;
@@ -469,6 +472,99 @@
   font-weight: 650;
   cursor: pointer;
 }
+
+.schedule-loading,
+.schedule-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 420px;
+  color: #68736c;
+  font-size: 0.9rem;
+}
+
+.patient-search-results {
+  display: flex;
+  flex-direction: column;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid #d8dfda;
+  border-radius: 8px;
+  background: white;
+}
+
+.patient-search-result {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-bottom: 1px solid #edf0ee;
+  background: white;
+  color: #26352d;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.patient-search-result:last-child {
+  border-bottom: 0;
+}
+
+.patient-search-result:hover {
+  background: #f3f8f4;
+}
+
+.patient-search-result strong {
+  font-size: 0.84rem;
+}
+
+.patient-search-result span {
+  color: #758078;
+  font-size: 0.73rem;
+}
+
+.patient-search-message {
+  padding: 10px 12px;
+  color: #68736c;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.patient-clear {
+  align-self: flex-start;
+  margin-top: -3px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--green);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.modal-delete-button {
+  margin-right: auto;
+}
+
+@media (max-width: 900px) {
+  .schedule-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .schedule-controls {
+    width: 100%;
+  }
+
+  .date-picker {
+    flex: 1;
+  }
+}
+
 @media (max-width: 700px) {
   .schedule-calendar {
     height: 65vh;

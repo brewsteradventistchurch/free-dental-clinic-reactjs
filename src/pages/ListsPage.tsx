@@ -1,32 +1,75 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { patients as schedulePatients } from "../schedule/mockScheduleData";
+import { searchPatients } from "../api/patients";
+import type { Patient } from "../schedule/types";
 
-const patientStatuses: Record<string, { status: string; provider: string }> = {
-  "patient-1": { status: "Waiting", provider: "—" },
-  "patient-2": { status: "With provider", provider: "Dr. Smith" },
-  "patient-3": { status: "Completed", provider: "Dr. Johnson" },
-  "patient-4": { status: "Waiting", provider: "—" },
-  "patient-5": { status: "Waiting", provider: "—" },
+type ListPatient = Patient & {
+  name: string;
 };
-
-const patients = schedulePatients.map((patient) => ({
-  ...patient,
-  name: `${patient.firstName} ${patient.lastName}`,
-  dob: "—",
-  status: patientStatuses[patient.id]?.status ?? "Waiting",
-  provider: patientStatuses[patient.id]?.provider ?? "—",
-}));
 
 export default function ListsPage() {
   const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [patients, setPatients] = useState<ListPatient[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
   const navigate = useNavigate();
 
-  const filteredPatients = patients.filter((patient) =>
-    `${patient.name} ${patient.id}`
-      .toLowerCase()
-      .includes(search.toLowerCase())
-  );
+  useEffect(() => {
+    const controller = new AbortController();
+
+    async function loadPatients() {
+      setLoading(true);
+      setError("");
+
+      try {
+        const loadedPatients = await searchPatients("", controller.signal);
+
+        if (controller.signal.aborted) return;
+
+        setPatients(
+          loadedPatients.map((patient) => ({
+            ...patient,
+            name: `${patient.firstName} ${patient.lastName}`,
+          })),
+        );
+      } catch (loadError) {
+        if (controller.signal.aborted) return;
+
+        console.error("Failed to load patients:", loadError);
+        setError("Patients could not be loaded. Please refresh and try again.");
+      } finally {
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
+      }
+    }
+
+    void loadPatients();
+
+    return () => {
+      controller.abort();
+    };
+  }, []);
+
+  const filteredPatients = useMemo(() => {
+    const normalizedSearch = search.trim().toLowerCase();
+
+    return patients.filter((patient) => {
+      const matchesSearch =
+        !normalizedSearch ||
+        `${patient.name} ${patient.patientNumber} ${patient.id}`
+          .toLowerCase()
+          .includes(normalizedSearch);
+
+      const matchesStatus =
+        statusFilter === "all" ||
+        patient.bookingStatus.toLowerCase() === statusFilter.toLowerCase();
+
+      return matchesSearch && matchesStatus;
+    });
+  }, [patients, search, statusFilter]);
 
   function schedulePatient(patientId: string) {
     navigate(`/schedule?patientId=${encodeURIComponent(patientId)}`);
@@ -56,13 +99,32 @@ export default function ListsPage() {
           />
         </div>
 
-        <select defaultValue="all">
+        <select
+          value={statusFilter}
+          onChange={(event) => setStatusFilter(event.target.value)}
+          aria-label="Filter patients by status"
+        >
           <option value="all">All statuses</option>
-          <option>Waiting</option>
-          <option>With provider</option>
-          <option>Completed</option>
+
+          {Array.from(
+            new Set(
+              patients
+                .map((patient) => patient.bookingStatus)
+                .filter((status) => status.trim()),
+            ),
+          ).map((status) => (
+            <option key={status} value={status}>
+              {status}
+            </option>
+          ))}
         </select>
       </div>
+
+      {error && (
+        <div className="error-message" role="alert">
+          {error}
+        </div>
+      )}
 
       <div className="table-card">
         <table>
@@ -78,34 +140,61 @@ export default function ListsPage() {
           </thead>
 
           <tbody>
-            {filteredPatients.map((patient) => (
-              <tr key={patient.id}>
-                <td>
-                  <strong>{patient.name}</strong>
-                </td>
-                <td>{patient.id}</td>
-                <td>{patient.dob}</td>
-                <td>
-                  <span
-                    className={`status status-${patient.status
-                      .toLowerCase()
-                      .replaceAll(" ", "-")}`}
-                  >
-                    {patient.status}
-                  </span>
-                </td>
-                <td>{patient.provider}</td>
-                <td className="patient-action-cell">
-                  <button
-                    type="button"
-                    className="patient-schedule-button"
-                    onClick={() => schedulePatient(patient.id)}
-                  >
-                    Add &amp; Schedule
-                  </button>
+            {loading ? (
+              <tr>
+                <td colSpan={6}>Loading patients...</td>
+              </tr>
+            ) : filteredPatients.length === 0 ? (
+              <tr>
+                <td colSpan={6}>
+                  {search.trim()
+                    ? "No patients match your search."
+                    : "No patients have been registered yet."}
                 </td>
               </tr>
-            ))}
+            ) : (
+              filteredPatients.map((patient) => {
+                const status = patient.bookingStatus || "—";
+
+                return (
+                  <tr key={patient.id}>
+                    <td>
+                      <strong>{patient.name}</strong>
+                    </td>
+
+                    <td>{patient.patientNumber}</td>
+
+                    <td>{patient.dateOfBirth ?? "—"}</td>
+
+                    <td>
+                      {status === "—" ? (
+                        "—"
+                      ) : (
+                        <span
+                          className={`status status-${status
+                            .toLowerCase()
+                            .replaceAll(" ", "-")}`}
+                        >
+                          {status}
+                        </span>
+                      )}
+                    </td>
+
+                    <td>—</td>
+
+                    <td className="patient-action-cell">
+                      <button
+                        type="button"
+                        className="patient-schedule-button"
+                        onClick={() => schedulePatient(patient.id)}
+                      >
+                        Add &amp; Schedule
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
           </tbody>
         </table>
       </div>

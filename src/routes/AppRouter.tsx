@@ -10,12 +10,16 @@ import ProtectedRoute from "../auth/ProtectedRoute";
 import AdminRoute from "../auth/AdminRoute";
 import ConfigPage from "../pages/ConfigPage";
 import AppLayout from "../components/AppLayout";
+import AccessPendingPage from "../pages/AccessPendingPage";
+import AccessDeniedPage from "../pages/AccessDeniedPage";
 
 export default function AppRouter() {
   return (
     <Routes>
       <Route path="/" element={<WelcomePage />} />
 
+      <Route path="/access-pending" element={<AccessPendingPage />} />
+      <Route path="/access-denied" element={<AccessDeniedPage />} />
       <Route element={<ProtectedRoute />}>
         <Route element={<AppLayout />}>
           <Route path="/dashboard" element={<DashboardPage />} />

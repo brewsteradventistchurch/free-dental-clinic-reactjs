@@ -1,30 +1,64 @@
-export type ServiceType = {
+export type Service = {
   id: string;
   name: string;
   defaultDurationMinutes: number;
+  active: boolean;
+  displayOrder: number;
+};
+
+export type ProviderAvailabilityBlock = {
+  startMinutes: number;
+  endMinutes: number;
+};
+
+export type ProviderAvailability = {
+  id: string;
+  providerId: string;
+  date: string;
+  blocks: ProviderAvailabilityBlock[];
 };
 
 export type Provider = {
   id: string;
   name: string;
-  title: string;
   serviceIds: string[];
+  active: boolean;
+  displayOrder: number;
 };
 
-/** One continuous block of time when a provider is available on a date. */
-export type ProviderAvailability = {
+export type ServiceArea = {
   id: string;
+  name: string;
+  active: boolean;
+  displayOrder: number;
+};
+
+export type ServiceAreaAssignment = {
+  id: string;
+  serviceAreaId: string;
   providerId: string;
   date: string;
-  startMinutes: number;
-  endMinutes: number;
 };
 
-export type BookingStatus = string;
+export type BookingStatus = {
+  id: string;
+  name: string;
+  active: boolean;
+  displayOrder: number;
+};
 
-export type RequestSource = string;
-
-export type FollowUpInterest = string;
+export type ClinicConfiguration = {
+  id: string;
+  services: Service[];
+  providers: Provider[];
+  serviceAreas: ServiceArea[];
+  bookingStatuses: BookingStatus[];
+  requestSources: string[];
+  preferredLanguages: string[];
+  communityFollowUps: string[];
+  updatedAt: string | null;
+  version: number | null;
+};
 
 export type PatientNoteLog = {
   id: string;
@@ -37,51 +71,52 @@ export type PatientNoteLog = {
 export type Patient = {
   id: string;
   patientNumber: string;
-
   firstName: string;
   lastName: string;
   dateOfBirth?: string;
-
   email?: string;
   cellPhone: string;
   alternatePhone?: string;
-
   preferredLanguage: string;
   needsTranslator: boolean;
-
   streetAddress?: string;
   streetCity?: string;
   streetState?: string;
   streetZip?: string;
-
   mailingAddress?: string;
   mailingCity?: string;
   mailingState?: string;
   mailingZip?: string;
-
   spouseOrParentName?: string;
   referral?: string;
-
-  bookingStatus: BookingStatus;
-  sourceOfRequest: RequestSource;
+  bookingStatus: string;
+  sourceOfRequest: string;
   requestDate: string;
-
   serviceRequested?: string;
-
-  followUpInterests: FollowUpInterest[];
-
+  followUpInterests: string[];
   noteLogs: PatientNoteLog[];
-
-  // createdAt: string;
-  // updatedAt: string;
 };
 
 export type Appointment = {
   id: string;
   patientId: string;
+  serviceAreaId: string;
   providerId: string;
   serviceId: string;
   date: string;
   startMinutes: number;
   durationMinutes: number;
+  bookingStatus: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AppointmentRequest = {
+  patientId: string;
+  serviceAreaId: string;
+  serviceId: string;
+  date: string;
+  startMinutes: number;
+  durationMinutes: number;
+  bookingStatus: string;
 };

@@ -1,12 +1,17 @@
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import {
-  getNextPatientId,
-  getScheduleStore,
-  saveScheduleStore,
-} from "../schedule/scheduleStore";
-import type { Patient } from "../schedule/types";
+  createPatient,
+  searchPatients,
+  updatePatient,
+  type PatientRequest,
+} from "../api/patients";
+import { getConfiguration } from "../api/configurationApi";
+import type {
+  ClinicConfiguration,
+  Patient,
+} from "../schedule/types";
 import "./RegistrationPage.css";
 
 type PatientForm = {
@@ -59,11 +64,11 @@ function nowForDateTimeInput() {
   return `${year}-${month}-${day}T${hours}:${minutes}`;
 }
 
-function emptyForm(): PatientForm {
-  const store = getScheduleStore();
-
+function emptyForm(
+  configuration?: ClinicConfiguration | null,
+): PatientForm {
   return {
-    id: getNextPatientId(store.patients),
+    id: "---",
 
     firstName: "",
     lastName: "",
@@ -74,7 +79,7 @@ function emptyForm(): PatientForm {
     alternatePhone: "",
 
     preferredLanguage:
-      store.preferredLanguages[0] ?? "English",
+      configuration?.preferredLanguages[0] ?? "English",
     needsTranslator: false,
 
     streetAddress: "",
@@ -91,13 +96,17 @@ function emptyForm(): PatientForm {
     referral: "",
 
     bookingStatus:
-      store.bookingStatuses[0] ?? "",
+      configuration?.bookingStatuses.find(
+        (status) => status.active,
+      )?.name ?? "",
 
-    sourceOfRequest: "",
+    sourceOfRequest:
+      configuration?.requestSources[0] ?? "",
 
     requestDate: nowForDateTimeInput(),
 
-    serviceRequested: "",
+    serviceRequested:
+      configuration?.services.find((service) => service.active)?.id ?? "",
 
     followUpInterests: [],
 
@@ -149,45 +158,125 @@ export default function RegistrationPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
 
-  const [store, setStore] = useState(getScheduleStore);
+  const [configuration, setConfiguration] =
+    useState<ClinicConfiguration | null>(null);
+
+  const [configurationLoading, setConfigurationLoading] = useState(true);
+  const [configurationError, setConfigurationError] = useState("");
+
   const [form, setForm] = useState<PatientForm>(() => emptyForm());
+
+  const [currentPatient, setCurrentPatient] =
+    useState<Patient | null>(null);
 
   const [searchTerm, setSearchTerm] = useState("");
   const [searchResultsOpen, setSearchResultsOpen] = useState(false);
 
   const [editingExistingPatient, setEditingExistingPatient] =
     useState(false);
+  const [pendingNoteLogs, setPendingNoteLogs] = useState<
+    NonNullable<Patient["noteLogs"]>
+  >([]);
 
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [notificationKey, setNotificationKey] = useState(0);
+  const [invalidFields, setInvalidFields] = useState<Set<string>>(() => new Set());
 
-  const [hasSaved, setHasSaved] = useState(false);
+  const [openSections, setOpenSections] = useState<Set<number>>(
+    () => new Set([0]),
+  );
 
-  const searchResults = useMemo(() => {
-    const query = searchTerm.trim().toLowerCase();
+  const [searchResults, setSearchResults] = useState<Patient[]>([]);
+  const [searchingPatients, setSearchingPatients] = useState(false);
 
-    if (!query) {
-      return [];
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadConfiguration() {
+      setConfigurationLoading(true);
+      setConfigurationError("");
+
+      try {
+        const loadedConfiguration = await getConfiguration();
+
+        if (cancelled) {
+          return;
+        }
+
+        setConfiguration(loadedConfiguration);
+
+        setForm((current) => {
+          if (current.id !== "---") {
+            return current;
+          }
+
+          return emptyForm(loadedConfiguration);
+        });
+      } catch (configurationLoadError) {
+        if (cancelled) {
+          return;
+        }
+
+        console.error(
+          "Failed to load clinic configuration:",
+          configurationLoadError,
+        );
+
+        setConfigurationError(
+          "Clinic configuration could not be loaded. Please refresh and try again.",
+        );
+      } finally {
+        if (!cancelled) {
+          setConfigurationLoading(false);
+        }
+      }
     }
 
-    return store.patients
-      .filter((patient) => {
-        const searchable = [
-          patient.id,
-          patient.firstName,
-          patient.lastName,
-          `${patient.firstName} ${patient.lastName}`,
-          patient.cellPhone,
-          patient.alternatePhone ?? "",
-          patient.email ?? "",
-        ]
-          .join(" ")
-          .toLowerCase();
+    void loadConfiguration();
 
-        return searchable.includes(query);
-      })
-      .slice(0, 8);
-  }, [searchTerm, store.patients]);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const query = searchTerm.trim();
+
+    if (!query) {
+      setSearchResults([]);
+      setSearchingPatients(false);
+      return;
+    }
+
+    const controller = new AbortController();
+
+    const timer = window.setTimeout(async () => {
+      setSearchingPatients(true);
+
+      try {
+        const patients = await searchPatients(query, controller.signal);
+
+        setSearchResults(patients.slice(0, 8));
+      } catch (searchError) {
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        console.error("Failed to search patients:", searchError);
+        setSearchResults([]);
+      } finally {
+        if (!controller.signal.aborted) {
+          setSearchingPatients(false);
+        }
+      }
+    }, 300);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [searchTerm]);
 
   function update<K extends keyof PatientForm>(
     field: K,
@@ -197,6 +286,26 @@ export default function RegistrationPage() {
       ...current,
       [field]: value,
     }));
+
+    setInvalidFields((current) => {
+      if (!current.has(field)) {
+        return current;
+      }
+
+      const next = new Set(current);
+      next.delete(field);
+      return next;
+    });
+  }
+
+  function showError(messageText: string, field?: keyof PatientForm) {
+    setError(messageText);
+    setMessage("");
+    setNotificationKey((current) => current + 1);
+
+    setInvalidFields(() =>
+      field ? new Set([field]) : new Set(),
+    );
   }
 
   function toggleInterest(interest: string) {
@@ -209,122 +318,198 @@ export default function RegistrationPage() {
   }
 
   function selectPatient(patient: Patient) {
+    setCurrentPatient(patient);
     setForm(patientToForm(patient));
     setEditingExistingPatient(true);
-    setHasSaved(true);
+    setPendingNoteLogs([...(patient.noteLogs ?? [])]);
     setSearchResultsOpen(false);
     setSearchTerm("");
     setError("");
-    setMessage(`Loaded patient ${patient.id}.`);
+    setInvalidFields(new Set());
+    setMessage(`Loaded patient ${patient.patientNumber}.`);
   }
 
   function startOver() {
-    setForm(emptyForm());
+    setCurrentPatient(null);
+    setForm(emptyForm(configuration));
     setEditingExistingPatient(false);
-    setHasSaved(false);
+    setPendingNoteLogs([]);
     setError("");
+    setInvalidFields(new Set());
     setMessage("");
     setSearchTerm("");
     setSearchResultsOpen(false);
   }
 
+  function toggleSection(index: number) {
+    setOpenSections((current) => {
+      const next = new Set(current);
+      if (next.has(index)) {
+        next.delete(index);
+      } else {
+        next.add(index);
+      }
+      return next;
+    });
+  }
+
+  function handleSectionKeyDown(
+    index: number,
+    event: React.KeyboardEvent<HTMLElement>,
+  ) {
+    if (event.key !== "Tab" || event.shiftKey || index >= 5) {
+      return;
+    }
+
+    const focusable = Array.from(
+      event.currentTarget.querySelectorAll<HTMLElement>(
+        'input, select, textarea, button:not([disabled])',
+      ),
+    ).filter((element) => !element.hidden && element.offsetParent !== null);
+
+    const lastFocusable = focusable[focusable.length - 1];
+    if (document.activeElement !== lastFocusable) {
+      return;
+    }
+
+    event.preventDefault();
+    const nextIndex = index + 1;
+
+    setOpenSections((current) => {
+      const next = new Set(current);
+      next.delete(index);
+      next.add(nextIndex);
+      return next;
+    });
+
+    window.setTimeout(() => {
+      const sections = document.querySelectorAll<HTMLElement>(
+        ".registration-section",
+      );
+      const nextSection = sections[nextIndex];
+      const firstFocusable = nextSection
+        ? Array.from(
+            nextSection.querySelectorAll<HTMLElement>(
+              'input, select, textarea, button:not([disabled])',
+            ),
+          ).find(
+            (element) =>
+              !element.hidden &&
+              element.offsetParent !== null &&
+              !element.classList.contains("registration-section-toggle"),
+          )
+        : undefined;
+      firstFocusable?.focus();
+    }, 0);
+  }
+
+  function addNote() {
+    const note = form.newNote.trim();
+
+    if (!note) {
+      showError("Enter a note before adding it.", "newNote");
+      return;
+    }
+
+    const noteLog: Patient["noteLogs"][number] = {
+      id: crypto.randomUUID(),
+      note,
+      createdAt: new Date().toISOString(),
+      volunteerId: user?.id ?? "",
+      volunteerName:
+        user?.firstName ?? user?.email ?? "Clinic staff",
+    };
+
+    setPendingNoteLogs((current) => [...current, noteLog]);
+    setForm((current) => ({ ...current, newNote: "" }));
+    setError("");
+    setMessage(
+      editingExistingPatient
+        ? "Note added. Save the patient to record it."
+        : "Note added to the new patient registration.",
+    );
+  }
+
   function validate(): boolean {
     if (!form.firstName.trim()) {
-      setError("First name is required.");
+      showError("First name is required.", "firstName");
       return false;
     }
 
     if (!form.lastName.trim()) {
-      setError("Last name is required.");
+      showError("Last name is required.", "lastName");
       return false;
     }
 
     if (!form.bookingStatus) {
-      setError("Booking status is required.");
+      showError("Booking status is required.", "bookingStatus");
       return false;
     }
 
     if (!form.sourceOfRequest) {
-      setError("Source of request is required.");
+      showError("Source of request is required.", "sourceOfRequest");
       return false;
     }
 
     if (!form.cellPhone.trim()) {
-      setError("Cell phone is required so the patient can be contacted.");
+      showError("Cell phone is required so the patient can be contacted.", "cellPhone");
       return false;
     }
 
     if (!form.serviceRequested) {
-      setError("Please select the service requested.");
+      showError("Please select the service requested.", "serviceRequested");
       return false;
     }
 
     return true;
   }
 
-  function buildPatient(existingPatient?: Patient): Patient {
-    const now = new Date().toISOString();
-
-    const noteLogs = [...(existingPatient?.noteLogs ?? [])];
-
-    if (form.newNote.trim()) {
-      noteLogs.push({
-        id: `note-${Date.now()}`,
-        note: form.newNote.trim(),
-        createdAt: now,
-        volunteerId: user?.id + '',
-        volunteerName:
-          // TODO maybe use:
-          // user ? `${user.firstName} ${user.lastName}`
-          user?.firstName ??
-          user?.email ??
-          "Clinic staff",
-      });
-    }
-
+  function buildPatientRequest(): PatientRequest {
     return {
-      id: form.id,
-
       firstName: form.firstName.trim(),
       lastName: form.lastName.trim(),
+      dateOfBirth: form.dateOfBirth || null,
 
-      dateOfBirth: form.dateOfBirth || undefined,
+      contact: {
+        email: form.email.trim(),
+        cellPhone: form.cellPhone.trim(),
+        alternatePhone: form.alternatePhone.trim(),
+      },
 
-      email: form.email.trim() || undefined,
-      cellPhone: form.cellPhone.trim(),
-      alternatePhone: form.alternatePhone.trim() || undefined,
+      streetAddress: {
+        address: form.streetAddress.trim(),
+        city: form.streetCity.trim(),
+        state: form.streetState,
+        zip: form.streetZip.trim(),
+      },
 
+      mailingAddress: {
+        address: form.mailingAddress.trim(),
+        city: form.mailingCity.trim(),
+        state: form.mailingState,
+        zip: form.mailingZip.trim(),
+      },
+
+      spouseOrParentName: form.spouseOrParentName.trim(),
       preferredLanguage: form.preferredLanguage,
       needsTranslator: form.needsTranslator,
 
-      streetAddress: form.streetAddress.trim() || undefined,
-      streetCity: form.streetCity.trim() || undefined,
-      streetState: form.streetState || undefined,
-      streetZip: form.streetZip.trim() || undefined,
-
-      mailingAddress: form.mailingAddress.trim() || undefined,
-      mailingCity: form.mailingCity.trim() || undefined,
-      mailingState: form.mailingState || undefined,
-      mailingZip: form.mailingZip.trim() || undefined,
-
-      spouseOrParentName: form.spouseOrParentName.trim() || undefined,
-
-      referral: form.referral.trim() || undefined,
-
-      bookingStatus: form.bookingStatus,
-      sourceOfRequest: form.sourceOfRequest,
-      requestDate: form.requestDate,
-
-      serviceRequested: form.serviceRequested,
+      request: {
+        bookingStatus: form.bookingStatus,
+        sourceOfRequest: form.sourceOfRequest,
+        requestDate: form.requestDate
+          ? new Date(form.requestDate).toISOString()
+          : null,
+        serviceRequested: form.serviceRequested,
+        referral: form.referral.trim(),
+      },
 
       followUpInterests: [...form.followUpInterests],
-
-      noteLogs,
-      patientNumber: ""
+      noteLogs: [...pendingNoteLogs],
     };
   }
 
-  function savePatient(shouldSchedule: boolean) {
+  async function savePatient(shouldSchedule: boolean) {
     setError("");
     setMessage("");
 
@@ -332,45 +517,42 @@ export default function RegistrationPage() {
       return;
     }
 
-    const existingPatient = store.patients.find(
-      (patient) => patient.id === form.id,
-    );
+    try {
+      const request = buildPatientRequest();
 
-    const patient = buildPatient(existingPatient);
+      const patient = currentPatient
+        ? await updatePatient(currentPatient.id, request)
+        : await createPatient(request);
 
-    const nextPatients = existingPatient
-      ? store.patients.map((item) =>
-          item.id === patient.id ? patient : item,
-        )
-      : [...store.patients, patient];
+      setCurrentPatient(patient);
+      setPendingNoteLogs([...(patient.noteLogs ?? [])]);
 
-    const nextStore = {
-      ...store,
-      patients: nextPatients,
-    };
+      setForm({
+        ...patientToForm(patient),
+        newNote: "",
+      });
 
-    saveScheduleStore(nextStore);
-    setStore(nextStore);
+      setEditingExistingPatient(true);
 
-    setForm({
-      ...patientToForm(patient),
-      newNote: "",
-    });
+      if (shouldSchedule) {
+        navigate(
+          `/schedule?patientId=${encodeURIComponent(patient.id)}`,
+        );
+        return;
+      }
 
-    setHasSaved(true);
+      setMessage(
+        currentPatient
+          ? `Patient ${patient.patientNumber} updated successfully.`
+          : `Patient ${patient.patientNumber} registered successfully.`,
+      );
+    } catch (saveError) {
+      console.error("Failed to save patient:", saveError);
 
-    if (shouldSchedule) {
-      navigate(`/schedule?patientId=${encodeURIComponent(patient.id)}`);
-      return;
+      setError(
+        "The patient could not be saved. Please try again.",
+      );
     }
-
-    setMessage(
-      existingPatient
-        ? `Patient ${patient.id} updated successfully.`
-        : `Patient ${patient.id} registered successfully.`,
-    );
-    // TODO remove. It's just to keep hasSaved
-    if (hasSaved) setHasSaved(true);
   }
 
   return (
@@ -386,8 +568,10 @@ export default function RegistrationPage() {
         </div>
 
         <div className="registration-id">
-          <span>Patient ID</span>
-          <strong>{form.id}</strong>
+          <span>Patient number</span>
+          <strong>
+            {currentPatient?.patientNumber ?? "New patient"}
+          </strong>
         </div>
       </div>
 
@@ -413,7 +597,11 @@ export default function RegistrationPage() {
 
           {searchResultsOpen && searchTerm.trim() && (
             <div className="registration-search-results">
-              {searchResults.length ? (
+              {searchingPatients ? (
+                <div className="search-no-results">
+                  Searching...
+                </div>
+              ) : searchResults.length ? (
                 searchResults.map((patient) => (
                   <button
                     type="button"
@@ -421,7 +609,7 @@ export default function RegistrationPage() {
                     onClick={() => selectPatient(patient)}
                   >
                     <span className="search-result-id">
-                      {patient.id}
+                      {patient.patientNumber}
                     </span>
 
                     <span className="search-result-main">
@@ -448,15 +636,41 @@ export default function RegistrationPage() {
         </div>
       </div>
 
-      {message && (
-        <div className="registration-message" role="status">
-          {message}
+      {configurationLoading && (
+        <div className="registration-notifications" aria-live="polite">
+          <div className="registration-message" role="status">
+            Loading clinic configuration...
+          </div>
         </div>
       )}
 
-      {error && (
-        <div className="registration-error" role="alert">
-          {error}
+      {configurationError && (
+        <div className="registration-notifications" aria-live="polite">
+          <div className="registration-error" role="alert">
+            {configurationError}
+          </div>
+        </div>
+      )}
+
+      {(message || error) && (
+        <div className="registration-notifications" aria-live="polite">
+          {error ? (
+            <div
+              key={`error-${notificationKey}`}
+              className="registration-error"
+              role="alert"
+            >
+              {error}
+            </div>
+          ) : (
+            <div
+              key={`message-${notificationKey}`}
+              className="registration-message"
+              role="status"
+            >
+              {message}
+            </div>
+          )}
         </div>
       )}
 
@@ -464,12 +678,21 @@ export default function RegistrationPage() {
         className="registration-card"
         onSubmit={(event) => event.preventDefault()}
       >
-        <section className="registration-section">
+        <section
+          className={`registration-section ${openSections.has(0) ? "open" : ""}`}
+          onKeyDown={(event) => handleSectionKeyDown(0, event)}
+        >
           <div className="registration-section-heading">
-            <div>
+            <button
+              type="button"
+              className="registration-section-toggle"
+              onClick={() => toggleSection(0)}
+              aria-expanded={openSections.has(0)}
+            >
               <span className="section-number">01</span>
               <h2>Patient information</h2>
-            </div>
+              <span className="section-chevron" aria-hidden="true">⌄</span>
+            </button>
 
             {editingExistingPatient && (
               <span className="editing-badge">
@@ -480,8 +703,10 @@ export default function RegistrationPage() {
 
           <div className="registration-grid">
             <label>
-              First name
+              <span className="label-text">First name <span className="required-marker">*</span></span>
               <input
+                className={invalidFields.has("firstName") ? "field-invalid" : ""}
+                aria-invalid={invalidFields.has("firstName")}
                 value={form.firstName}
                 onChange={(event) =>
                   update("firstName", event.target.value)
@@ -491,8 +716,10 @@ export default function RegistrationPage() {
             </label>
 
             <label>
-              Last name
+              <span className="label-text">Last name <span className="required-marker">*</span></span>
               <input
+                className={invalidFields.has("lastName") ? "field-invalid" : ""}
+                aria-invalid={invalidFields.has("lastName")}
                 value={form.lastName}
                 onChange={(event) =>
                   update("lastName", event.target.value)
@@ -527,22 +754,30 @@ export default function RegistrationPage() {
           </div>
         </section>
 
-        <section className="registration-section">
+        <section
+          className={`registration-section ${openSections.has(1) ? "open" : ""}`}
+          onKeyDown={(event) => handleSectionKeyDown(1, event)}
+        >
           <div className="registration-section-heading">
-            <div>
+            <button
+              type="button"
+              className="registration-section-toggle"
+              onClick={() => toggleSection(1)}
+              aria-expanded={openSections.has(1)}
+            >
               <span className="section-number">02</span>
               <h2>Request & contact</h2>
-            </div>
+              <span className="section-chevron" aria-hidden="true">⌄</span>
+            </button>
 
-            <span className="required-note">
-              * Required
-            </span>
           </div>
 
           <div className="registration-grid">
             <label>
-              Booking status <span>*</span>
+              <span className="label-text">Booking status <span className="required-marker">*</span></span>
               <select
+                className={invalidFields.has("bookingStatus") ? "field-invalid" : ""}
+                aria-invalid={invalidFields.has("bookingStatus")}
                 value={form.bookingStatus}
                 onChange={(event) =>
                   update("bookingStatus", event.target.value)
@@ -553,19 +788,22 @@ export default function RegistrationPage() {
                   Select status...
                 </option>
 
-                {store.bookingStatuses.map(
-                  (status) => (
-                    <option value={status} key={status}>
-                      {status}
+                {configuration?.bookingStatuses
+                  .filter((status) => status.active)
+                  .sort((a, b) => a.displayOrder - b.displayOrder)
+                  .map((status) => (
+                    <option value={status.name} key={status.id}>
+                      {status.name}
                     </option>
-                  ),
-                )}
+                  ))}
               </select>
             </label>
 
             <label>
-              Source of request <span>*</span>
+              <span className="label-text">Source of request <span className="required-marker">*</span></span>
               <select
+                className={invalidFields.has("sourceOfRequest") ? "field-invalid" : ""}
+                aria-invalid={invalidFields.has("sourceOfRequest")}
                 value={form.sourceOfRequest}
                 onChange={(event) =>
                   update(
@@ -579,13 +817,11 @@ export default function RegistrationPage() {
                   Select source...
                 </option>
 
-                {store.requestSources.map(
-                  (source) => (
-                    <option value={source} key={source}>
-                      {source}
-                    </option>
-                  ),
-                )}
+                {configuration?.requestSources.map((source) => (
+                  <option value={source} key={source}>
+                    {source}
+                  </option>
+                ))}
               </select>
             </label>
 
@@ -604,8 +840,10 @@ export default function RegistrationPage() {
             </label>
 
             <label>
-              Service requested
+              <span className="label-text">Service requested <span className="required-marker">*</span></span>
               <select
+                className={invalidFields.has("serviceRequested") ? "field-invalid" : ""}
+                aria-invalid={invalidFields.has("serviceRequested")}
                 value={form.serviceRequested}
                 onChange={(event) =>
                   update(
@@ -618,17 +856,22 @@ export default function RegistrationPage() {
                   Select service...
                 </option>
 
-                {store.services.map((service) => (
-                  <option value={service.id} key={service.id}>
-                    {service.name}
-                  </option>
-                ))}
+                {configuration?.services
+                  .filter((service) => service.active)
+                  .sort((a, b) => a.displayOrder - b.displayOrder)
+                  .map((service) => (
+                    <option value={service.id} key={service.id}>
+                      {service.name}
+                    </option>
+                  ))}
               </select>
             </label>
 
             <label>
-              Cell phone <span>*</span>
+              <span className="label-text">Cell phone <span className="required-marker">*</span></span>
               <input
+                className={invalidFields.has("cellPhone") ? "field-invalid" : ""}
+                aria-invalid={invalidFields.has("cellPhone")}
                 type="tel"
                 value={form.cellPhone}
                 onChange={(event) =>
@@ -675,12 +918,23 @@ export default function RegistrationPage() {
           </div>
         </section>
 
-        <section className="registration-section">
+        <section
+          className={`registration-section ${openSections.has(2) ? "open" : ""}`}
+          onKeyDown={(event) => handleSectionKeyDown(2, event)}
+        >
           <div className="registration-section-heading">
-            <div>
+            <button
+              type="button"
+              className="registration-section-toggle"
+              onClick={() => toggleSection(2)}
+              aria-expanded={openSections.has(2)}
+            >
               <span className="section-number">03</span>
               <h2>Language</h2>
-            </div>
+              <span className="section-chevron" aria-hidden="true">⌄</span>
+            </button>
+
+
           </div>
 
           <div className="registration-grid language-grid">
@@ -695,21 +949,18 @@ export default function RegistrationPage() {
                   )
                 }
               >
-                {store.preferredLanguages.map(
-                  (language) => (
-                    <option
-                      value={language}
-                      key={language}
-                    >
-                      {language}
-                    </option>
-                  ),
-                )}
+                {configuration?.preferredLanguages.map((language) => (
+                  <option value={language} key={language}>
+                    {language}
+                  </option>
+                ))}
               </select>
             </label>
 
             <label className="checkbox-field">
-              <input
+              <span className="checkbox-label-spacer" aria-hidden="true">&nbsp;</span>
+              <span className="checkbox-control">
+                <input
                 type="checkbox"
                 checked={form.needsTranslator}
                 onChange={(event) =>
@@ -718,30 +969,41 @@ export default function RegistrationPage() {
                     event.target.checked,
                   )
                 }
-              />
-
-              <span>
-                <strong>Needs translator</strong>
-                <small>
-                  Mark if language assistance will be needed.
-                </small>
+                />
+                <span>
+                  <strong>Needs translator</strong>
+                  <small>
+                    Mark if language assistance will be needed.
+                  </small>
+                </span>
               </span>
             </label>
           </div>
         </section>
 
-        <section className="registration-section">
+        <section
+          className={`registration-section ${openSections.has(3) ? "open" : ""}`}
+          onKeyDown={(event) => handleSectionKeyDown(3, event)}
+        >
           <div className="registration-section-heading">
-            <div>
+            <button
+              type="button"
+              className="registration-section-toggle"
+              onClick={() => toggleSection(3)}
+              aria-expanded={openSections.has(3)}
+            >
               <span className="section-number">04</span>
               <h2>Address</h2>
-            </div>
+              <span className="section-chevron" aria-hidden="true">⌄</span>
+            </button>
+
+
           </div>
 
           <h3>Street address</h3>
 
           <div className="registration-grid address-grid">
-            <label className="wide-field">
+            <label>
               Street address
               <input
                 value={form.streetAddress}
@@ -798,7 +1060,7 @@ export default function RegistrationPage() {
           </h3>
 
           <div className="registration-grid address-grid">
-            <label className="wide-field">
+            <label>
               Mailing address
               <input
                 value={form.mailingAddress}
@@ -857,12 +1119,23 @@ export default function RegistrationPage() {
           </div>
         </section>
 
-        <section className="registration-section">
+        <section
+          className={`registration-section ${openSections.has(4) ? "open" : ""}`}
+          onKeyDown={(event) => handleSectionKeyDown(4, event)}
+        >
           <div className="registration-section-heading">
-            <div>
+            <button
+              type="button"
+              className="registration-section-toggle"
+              onClick={() => toggleSection(4)}
+              aria-expanded={openSections.has(4)}
+            >
               <span className="section-number">05</span>
               <h2>Community follow-up</h2>
-            </div>
+              <span className="section-chevron" aria-hidden="true">⌄</span>
+            </button>
+
+
           </div>
 
           <p className="section-description">
@@ -872,7 +1145,7 @@ export default function RegistrationPage() {
           </p>
 
           <div className="interest-grid">
-            {store.followUpInterests.map(
+            {configuration?.communityFollowUps.map(
               (interest) => (
                 <label
                   className={`interest-option ${
@@ -899,17 +1172,29 @@ export default function RegistrationPage() {
           </div>
         </section>
 
-        <section className="registration-section">
+        <section
+          className={`registration-section ${openSections.has(5) ? "open" : ""}`}
+          onKeyDown={(event) => handleSectionKeyDown(5, event)}
+        >
           <div className="registration-section-heading">
-            <div>
+            <button
+              type="button"
+              className="registration-section-toggle"
+              onClick={() => toggleSection(5)}
+              aria-expanded={openSections.has(5)}
+            >
               <span className="section-number">06</span>
               <h2>Notes</h2>
-            </div>
+              <span className="section-chevron" aria-hidden="true">⌄</span>
+            </button>
+
+
           </div>
 
-          <label className="note-input">
-            Add note
+          <div className="note-input">
+            <label htmlFor="patient-note">Add note</label>
             <textarea
+              id="patient-note"
               rows={3}
               placeholder="Add a note about this patient or request..."
               value={form.newNote}
@@ -917,14 +1202,19 @@ export default function RegistrationPage() {
                 update("newNote", event.target.value)
               }
             />
-          </label>
+            <div className="note-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={addNote}
+              >
+                Add note
+              </button>
+            </div>
+          </div>
 
           {(() => {
-            const existingPatient = store.patients.find(
-              (patient) => patient.id === form.id,
-            );
-
-            const logs = existingPatient?.noteLogs ?? [];
+            const logs = pendingNoteLogs;
 
             if (!logs.length) {
               return (
@@ -979,6 +1269,7 @@ export default function RegistrationPage() {
               type="button"
               className="secondary-button"
               onClick={() => savePatient(false)}
+              disabled={configurationLoading || !configuration}
             >
               Save patient
             </button>
@@ -987,6 +1278,7 @@ export default function RegistrationPage() {
               type="button"
               className="primary-button"
               onClick={() => savePatient(true)}
+              disabled={configurationLoading || !configuration}
             >
               Save & schedule
             </button>

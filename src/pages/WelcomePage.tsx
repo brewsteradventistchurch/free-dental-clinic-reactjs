@@ -1,13 +1,10 @@
-import { useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 
 export default function WelcomePage() {
   const { login } = useAuth();
-  const navigate = useNavigate();
 
-  async function handleLogin() {
-    await login();
-    navigate("/dashboard");
+  function handleLogin() {
+    login();
   }
 
   return (

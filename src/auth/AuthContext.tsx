@@ -1,12 +1,18 @@
 import {
   createContext,
+  useCallback,
   useContext,
+  useEffect,
   useMemo,
   useState,
   type ReactNode,
 } from "react";
 
-import type { AuthContextType, User } from "../types/auth";
+import type {
+  AuthContextType,
+  AuthStatus,
+  User,
+} from "../types/auth";
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
@@ -16,33 +22,72 @@ interface Props {
 
 export function AuthProvider({ children }: Props) {
   const [user, setUser] = useState<User | null>(null);
+  const [status, setStatus] = useState<AuthStatus>("loading");
 
-  const loading = false;
+  const loadCurrentUser = useCallback(async () => {
+    try {
+      const response = await fetch("/api/v1/auth/me", {
+        credentials: "include",
+      });
 
-  async function login() {
-    // Temporary fake login
-    setUser({
-      id: "1",
-      email: "developer@test.com",
-      firstName: "Dental",
-      lastName: "Volunteer",
-      role: "Admin",
-    });
-  }
+      if (response.ok) {
+        const currentUser: User = await response.json();
 
-  function logout() {
+        setUser(currentUser);
+        setStatus("authenticated");
+        return;
+      }
+
+      if (response.status === 401) {
+        setUser(null);
+        setStatus("unauthenticated");
+        return;
+      }
+
+      if (response.status === 403) {
+        setUser(null);
+        setStatus("unauthorized");
+        return;
+      }
+
+      console.error(
+        `Unexpected authentication response: ${response.status}`
+      );
+
+      setUser(null);
+      setStatus("unauthenticated");
+    } catch (error) {
+      console.error("Failed to load current user:", error);
+      setUser(null);
+      setStatus("unauthenticated");
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadCurrentUser();
+  }, [loadCurrentUser]);
+
+  const login = useCallback(() => {
+    window.location.assign("/oauth2/authorization/google");
+  }, []);
+
+  const logout = useCallback(() => {
     setUser(null);
-  }
+    setStatus("unauthenticated");
+    window.location.assign("/logout");
+  }, []);
 
-  const value = useMemo(
+  const value = useMemo<AuthContextType>(
     () => ({
       user,
-      authenticated: user !== null,
-      loading,
+      status,
+      loading: status === "loading",
+      authenticated: status === "authenticated",
       login,
       logout,
+      refreshUser: loadCurrentUser,
     }),
-    [user]
+    [user, status, login, logout, loadCurrentUser]
   );
 
   return (

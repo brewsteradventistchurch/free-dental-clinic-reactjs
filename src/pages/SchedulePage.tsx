@@ -1,996 +1,2739 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import type {
+  CSSProperties,
+  PointerEvent as ReactPointerEvent,
+} from "react";
 import { useSearchParams } from "react-router-dom";
-import { getScheduleStore, saveScheduleStore } from "../schedule/scheduleStore";
-import type { Appointment, Provider } from "../schedule/types";
+
+import {
+  createAppointment,
+  deleteAppointment,
+  getAppointments,
+  getProviderAvailability,
+  getServiceAreaAssignments,
+  updateAppointment,
+} from "../api/scheduling";
+import type { AppointmentRequest } from "../api/scheduling";
+import { getConfiguration } from "../api/configurationApi";
+import {
+  getPatient,
+  searchPatients,
+} from "../api/patients";
+import type {
+  Appointment,
+  ClinicConfiguration,
+  Patient,
+  Provider,
+  ProviderAvailability,
+  Service,
+  ServiceAreaAssignment,
+} from "../schedule/types";
+
 import "./SchedulePage.css";
 
 const SLOT_MINUTES = 20;
 const SLOT_HEIGHT = 44;
-
 const DAY_START = 7 * 60;
 const DAY_END = 18 * 60;
 
-function toDateString(date: Date): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
+const INITIAL_DATE_SEARCH_DAYS = 60;
 
-  return `${year}-${month}-${day}`;
+type ScheduleDayData = {
+  appointments: Appointment[];
+  availability: ProviderAvailability[];
+  assignments: ServiceAreaAssignment[];
+};
+
+type AppointmentDraft = AppointmentRequest & {
+  id?: string;
+};
+
+type PendingMove = {
+  appointment: Appointment;
+  serviceAreaId: string;
+  startMinutes: number;
+};
+
+type DragInteraction = {
+  mode: "drag" | "resize";
+  appointment: Appointment;
+  pointerStartX: number;
+  pointerStartY: number;
+  originalStartMinutes: number;
+  originalDurationMinutes: number;
+  originalServiceAreaId: string;
+  moved: boolean;
+};
+
+function pad(value: number): string {
+  return String(value).padStart(2, "0");
 }
 
-function formatDate(dateString: string): string {
-  const [year, month, day] = dateString.split("-").map(Number);
-
-  return new Intl.DateTimeFormat("en-US", {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
-    year: "numeric",
-  }).format(new Date(year, month - 1, day));
+function localDateString(date: Date): string {
+  return `${date.getFullYear()}-${pad(
+    date.getMonth() + 1,
+  )}-${pad(date.getDate())}`;
 }
 
-function formatTime(minutes: number): string {
-  const hours = Math.floor(minutes / 60);
-  const mins = minutes % 60;
-
-  const period = hours >= 12 ? "PM" : "AM";
-  const displayHour = hours % 12 || 12;
-
-  return `${displayHour}:${String(mins).padStart(2, "0")} ${period}`;
+function todayString(): string {
+  return localDateString(new Date());
 }
 
 function addDays(dateString: string, days: number): string {
-  const [year, month, day] = dateString.split("-").map(Number);
-  const date = new Date(year, month - 1, day);
+  const [year, month, day] = dateString
+    .split("-")
+    .map(Number);
 
+  const date = new Date(year, month - 1, day);
   date.setDate(date.getDate() + days);
 
-  return toDateString(date);
+  return localDateString(date);
 }
 
-function getInitialDate(): string {
-  const today = toDateString(new Date());
+function formatDate(dateString: string): string {
+  const [year, month, day] = dateString
+    .split("-")
+    .map(Number);
 
-  const futureAppointmentDates = [
-    ...new Set(
-      getScheduleStore().appointments
-        .map((appointment) => appointment.date)
-        .filter((date) => date >= today),
-    ),
-  ].sort();
-
-  return futureAppointmentDates[0] ?? today;
+  return new Date(year, month - 1, day).toLocaleDateString(
+    undefined,
+    {
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+      year: "numeric",
+    },
+  );
 }
 
-function getPatientName(patientId: string): string {
-  const schedPatient = getScheduleStore().patients.find(
-    (patient) => patient.id === patientId,
+function formatTime(minutes: number): string {
+  const hour24 = Math.floor(minutes / 60);
+  const minute = minutes % 60;
+
+  const suffix = hour24 >= 12 ? "PM" : "AM";
+  const hour12 = hour24 % 12 || 12;
+
+  return `${hour12}:${pad(minute)} ${suffix}`;
+}
+
+function minutesToTimeInput(minutes: number): string {
+  return `${pad(Math.floor(minutes / 60))}:${pad(
+    minutes % 60,
+  )}`;
+}
+
+function timeInputToMinutes(value: string): number {
+  const [hour, minute] = value.split(":").map(Number);
+
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) {
+    return DAY_START;
+  }
+
+  return hour * 60 + minute;
+}
+
+function roundToSlot(minutes: number): number {
+  return Math.round(minutes / SLOT_MINUTES) * SLOT_MINUTES;
+}
+
+function ceilToSlot(minutes: number): number {
+  return Math.ceil(minutes / SLOT_MINUTES) * SLOT_MINUTES;
+}
+
+function overlaps(
+  startA: number,
+  durationA: number,
+  startB: number,
+  durationB: number,
+): boolean {
+  const endA = startA + durationA;
+  const endB = startB + durationB;
+
+  return startA < endB && endA > startB;
+}
+
+async function fetchDayData(
+  date: string,
+): Promise<ScheduleDayData> {
+  const [
+    appointments,
+    availability,
+    assignments,
+  ] = await Promise.all([
+    getAppointments(date),
+    getProviderAvailability(date),
+    getServiceAreaAssignments(date),
+  ]);
+
+  return {
+    appointments,
+    availability,
+    assignments,
+  };
+}
+
+function getProviderForArea(
+  areaId: string,
+  data: ScheduleDayData,
+  configuration: ClinicConfiguration,
+): Provider | undefined {
+  const assignment = data.assignments.find(
+    (item) => item.serviceAreaId === areaId,
   );
 
-  return schedPatient
-    ? `${schedPatient.firstName} ${schedPatient.lastName}`
-    : "Unknown patient";
+  if (!assignment) {
+    return undefined;
+  }
+
+  return configuration.providers.find(
+    (provider) =>
+      provider.id === assignment.providerId &&
+      provider.active,
+  );
 }
 
-function getAvailabilities(
-  providerId: string,
-  date: string,
-  availabilityList: ReturnType<typeof getScheduleStore>["providerAvailability"],
-) {
-  return availabilityList
+function getServicesForArea(
+  areaId: string,
+  data: ScheduleDayData,
+  configuration: ClinicConfiguration,
+): Service[] {
+  const provider = getProviderForArea(
+    areaId,
+    data,
+    configuration,
+  );
+
+  if (!provider) {
+    return [];
+  }
+
+  const serviceIds = new Set(provider.serviceIds);
+
+  return configuration.services
     .filter(
-      (availability) =>
-        availability.providerId === providerId &&
-        availability.date === date,
+      (service) =>
+        service.active && serviceIds.has(service.id),
     )
-    .sort((a, b) => a.startMinutes - b.startMinutes);
+    .sort(
+      (a, b) => a.displayOrder - b.displayOrder,
+    );
 }
 
-function getAvailabilityBlockForStart(
-  providerId: string,
-  date: string,
-  startMinutes: number,
-  availabilityList: ReturnType<typeof getScheduleStore>["providerAvailability"],
-) {
-  return getAvailabilities(providerId, date, availabilityList).find(
-    (availability) =>
-      startMinutes >= availability.startMinutes &&
-      startMinutes < availability.endMinutes,
-  );
-}
-
-function getAvailabilityBlockForRange(
-  providerId: string,
-  date: string,
+function isRangeAvailable(
+  areaId: string,
+  serviceId: string,
   startMinutes: number,
   durationMinutes: number,
-  availabilityList: ReturnType<typeof getScheduleStore>["providerAvailability"],
-) {
-  const endMinutes = startMinutes + durationMinutes;
-  return getAvailabilities(providerId, date, availabilityList).find(
-    (availability) =>
-      startMinutes >= availability.startMinutes &&
-      endMinutes <= availability.endMinutes,
+  data: ScheduleDayData,
+  configuration: ClinicConfiguration,
+  excludedAppointmentId?: string,
+): boolean {
+  const provider = getProviderForArea(
+    areaId,
+    data,
+    configuration,
   );
+
+  if (!provider) {
+    return false;
+  }
+
+  const service = configuration.services.find(
+    (item) =>
+      item.id === serviceId &&
+      item.active,
+  );
+
+  if (
+    !service ||
+    !provider.serviceIds.includes(service.id)
+  ) {
+    return false;
+  }
+
+  const endMinutes =
+    startMinutes + durationMinutes;
+
+  if (
+    startMinutes < DAY_START ||
+    endMinutes > DAY_END ||
+    durationMinutes <= 0
+  ) {
+    return false;
+  }
+
+  const availability =
+    data.availability.find(
+      (item) =>
+        item.providerId ===
+        provider.id,
+    );
+
+  if (!availability) {
+    return false;
+  }
+
+  const insideAvailability =
+    availability.blocks.some(
+      (block) =>
+        startMinutes >=
+          block.startMinutes &&
+        endMinutes <=
+          block.endMinutes,
+    );
+
+  if (!insideAvailability) {
+    return false;
+  }
+
+  const conflictingAppointment =
+    data.appointments.some(
+      (appointment) => {
+        if (
+          appointment.id ===
+          excludedAppointmentId
+        ) {
+          return false;
+        }
+
+        if (
+          !overlaps(
+            startMinutes,
+            durationMinutes,
+            appointment.startMinutes,
+            appointment.durationMinutes,
+          )
+        ) {
+          return false;
+        }
+
+        /*
+         * An appointment occupies both:
+         *
+         * 1. its service area
+         * 2. its resolved provider
+         *
+         * Therefore either conflict makes the proposed
+         * placement invalid.
+         */
+        return (
+          appointment.serviceAreaId ===
+            areaId ||
+          appointment.providerId ===
+            provider.id
+        );
+      },
+    );
+
+  return !conflictingAppointment;
 }
 
-function isAvailableAt(
-  providerId: string,
-  date: string,
-  minutes: number,
-  availabilityList: ReturnType<typeof getScheduleStore>["providerAvailability"],
-) {
-  return Boolean(getAvailabilityBlockForStart(providerId, date, minutes, availabilityList));
+function findFirstAvailableStart(
+  areaId: string,
+  minimumStartMinutes: number,
+  data: ScheduleDayData,
+  configuration: ClinicConfiguration,
+): number | null {
+  const provider = getProviderForArea(
+    areaId,
+    data,
+    configuration,
+  );
+
+  if (!provider) {
+    return null;
+  }
+
+  const services = getServicesForArea(
+    areaId,
+    data,
+    configuration,
+  );
+
+  if (services.length === 0) {
+    return null;
+  }
+
+  const availability = data.availability.find(
+    (item) => item.providerId === provider.id,
+  );
+
+  if (!availability) {
+    return null;
+  }
+
+  for (
+    let start = Math.max(
+      DAY_START,
+      ceilToSlot(minimumStartMinutes),
+    );
+    start < DAY_END;
+    start += SLOT_MINUTES
+  ) {
+    for (const service of services) {
+      const duration = Math.max(
+        SLOT_MINUTES,
+        service.defaultDurationMinutes,
+      );
+
+      if (
+        isRangeAvailable(
+          areaId,
+          service.id,
+          start,
+          duration,
+          data,
+          configuration,
+        )
+      ) {
+        return start;
+      }
+    }
+  }
+
+  return null;
 }
 
-function hasService(provider: Provider, serviceId: string): boolean {
-  return provider.serviceIds.includes(serviceId);
+async function findInitialScheduleData(
+  configuration: ClinicConfiguration,
+): Promise<{
+  date: string;
+  data: ScheduleDayData;
+}> {
+  const today = todayString();
+
+  for (
+    let offset = 0;
+    offset <= INITIAL_DATE_SEARCH_DAYS;
+    offset += 1
+  ) {
+    const date = addDays(today, offset);
+
+    const [
+      availability,
+      assignments,
+    ] = await Promise.all([
+      getProviderAvailability(date),
+      getServiceAreaAssignments(date),
+    ]);
+
+    if (
+      availability.length === 0 ||
+      assignments.length === 0
+    ) {
+      continue;
+    }
+
+    const preliminaryData: ScheduleDayData = {
+      appointments: [],
+      availability,
+      assignments,
+    };
+
+    const minimumStart =
+      date === today
+        ? Math.max(
+            DAY_START,
+            ceilToSlot(
+              new Date().getHours() * 60 +
+                new Date().getMinutes(),
+            ),
+          )
+        : DAY_START;
+
+    const possibleArea = configuration.serviceAreas
+      .filter((area) => area.active)
+      .sort(
+        (a, b) =>
+          a.displayOrder - b.displayOrder,
+      )
+      .some(
+        (area) =>
+          findFirstAvailableStart(
+            area.id,
+            minimumStart,
+            preliminaryData,
+            configuration,
+          ) !== null,
+      );
+
+    if (!possibleArea) {
+      continue;
+    }
+
+    const appointments =
+      await getAppointments(date);
+
+    const completeData: ScheduleDayData = {
+      appointments,
+      availability,
+      assignments,
+    };
+
+    const actualAvailableArea =
+      configuration.serviceAreas
+        .filter((area) => area.active)
+        .sort(
+          (a, b) =>
+            a.displayOrder - b.displayOrder,
+        )
+        .some(
+          (area) =>
+            findFirstAvailableStart(
+              area.id,
+              minimumStart,
+              completeData,
+              configuration,
+            ) !== null,
+        );
+
+    if (actualAvailableArea) {
+      return {
+        date,
+        data: completeData,
+      };
+    }
+  }
+
+  return {
+    date: today,
+    data: await fetchDayData(today),
+  };
 }
 
 export default function SchedulePage() {
-  const [searchParams, setSearchParams] = useSearchParams();
-  const schedulingPatientId = searchParams.get("patientId");
+  const [searchParams, setSearchParams] =
+    useSearchParams();
 
-  const [scheduleData] = useState(getScheduleStore);
-  const patients = scheduleData.patients;
-  const [selectedDate, setSelectedDate] = useState(getInitialDate);
-  const schedulingPatient = patients.find(
-    (patient) => patient.id === schedulingPatientId,
+  const patientContextId =
+    searchParams.get("patientId");
+
+  const [
+    configuration,
+    setConfiguration,
+  ] = useState<ClinicConfiguration | null>(
+    null,
   );
 
-  const [scheduleAppointments, setScheduleAppointments] =
-    useState<Appointment[]>(() => scheduleData.appointments);
+  const [
+    selectedDate,
+    setSelectedDate,
+  ] = useState(todayString());
 
-  const [selectedAppointment, setSelectedAppointment] =
-    useState<Appointment | null>(null);
+  const [
+    dayData,
+    setDayData,
+  ] = useState<ScheduleDayData>({
+    appointments: [],
+    availability: [],
+    assignments: [],
+  });
 
-  const [draggingAppointmentId, setDraggingAppointmentId] =
-    useState<string | null>(null);
+  const [
+    loading,
+    setLoading,
+  ] = useState(true);
 
-  const dragStartYRef = useRef<number | null>(null);
-  const dragStartXRef = useRef<number | null>(null);
-  const originalStartMinutesRef = useRef<number | null>(null);
-  const originalProviderIdRef = useRef<string | null>(null);
+  const [
+    error,
+    setError,
+  ] = useState<string | null>(null);
 
-  const dragModeRef = useRef<"vertical" | "horizontal" | null>(null);
-  const hasDraggedRef = useRef(false);
-  const invalidDragMessageRef = useRef<string | null>(null);
+  const [
+    patientsById,
+    setPatientsById,
+  ] = useState<Record<string, Patient>>(
+    {},
+  );
 
-  const [dragError, setDragError] = useState<string | null>(null);
+  const patientCacheRef = useRef(
+    new Map<string, Patient>(),
+  );
 
-  const [pendingProviderMove, setPendingProviderMove] =
-    useState<{
-      appointmentId: string;
-      fromProviderId: string;
-      toProviderId: string;
-    } | null>(null);
+  const [
+    modalDraft,
+    setModalDraft,
+  ] = useState<AppointmentDraft | null>(
+    null,
+  );
 
-  const [resizingAppointmentId, setResizingAppointmentId] =
-    useState<string | null>(null);
+  const [
+    modalDayData,
+    setModalDayData,
+  ] = useState<ScheduleDayData | null>(
+    null,
+  );
 
-  const resizeStartYRef = useRef<number | null>(null);
-  const originalDurationRef = useRef<number | null>(null);
+  const [
+    modalDayLoading,
+    setModalDayLoading,
+  ] = useState(false);
 
-  const [newAppointmentDraft, setNewAppointmentDraft] = useState<{
-    providerId: string;
-    date: string;
-    startMinutes: number;
-    patientId: string;
-    serviceId: string;
-  } | null>(null);
+  const [
+    modalError,
+    setModalError,
+  ] = useState<string | null>(null);
 
-  const [creationError, setCreationError] = useState<string | null>(null);
+  const [
+    saving,
+    setSaving,
+  ] = useState(false);
 
-  const clinicProviders = useMemo(() => scheduleData.providers, [scheduleData.providers]);
+  const [
+    patientSearch,
+    setPatientSearch,
+  ] = useState("");
 
+  const [
+    patientSearchResults,
+    setPatientSearchResults,
+  ] = useState<Patient[]>([]);
 
-  const providers = clinicProviders;
+  const [
+    patientSearchLoading,
+    setPatientSearchLoading,
+  ] = useState(false);
 
-  function getService(serviceId: string) {
-    return scheduleData.services.find((service) => service.id === serviceId);
-  }
+  const [
+    pendingMove,
+    setPendingMove,
+  ] = useState<PendingMove | null>(
+    null,
+  );
+
+  const [
+    dragError,
+    setDragError,
+  ] = useState<string | null>(null);
+
+  const [
+    activeInteractionAppointmentId,
+    setActiveInteractionAppointmentId,
+  ] = useState<string | null>(null);
+
+  const interactionRef =
+    useRef<DragInteraction | null>(null);
+
+  const clickSuppressedRef =
+    useRef(false);
+
+  const loadRequestRef = useRef(0);
+
+  const activeServiceAreas = useMemo(() => {
+    if (!configuration) {
+      return [];
+    }
+
+    return configuration.serviceAreas
+      .filter((area) => area.active)
+      .sort(
+        (a, b) =>
+          a.displayOrder - b.displayOrder,
+      );
+  }, [configuration]);
+
+  const providerById = useMemo(() => {
+    const map = new Map<string, Provider>();
+
+    configuration?.providers.forEach(
+      (provider) => {
+        map.set(provider.id, provider);
+      },
+    );
+
+    return map;
+  }, [configuration]);
+
+  const serviceById = useMemo(() => {
+    const map = new Map<string, Service>();
+
+    configuration?.services.forEach(
+      (service) => {
+        map.set(service.id, service);
+      },
+    );
+
+    return map;
+  }, [configuration]);
+
+  const bookingStatuses = useMemo(
+    () =>
+      configuration?.bookingStatuses
+        .filter((status) => status.active)
+        .sort(
+          (a, b) =>
+            a.displayOrder - b.displayOrder,
+        ) ?? [],
+    [configuration],
+  );
+
+  const loadPatientsForIds = useCallback(
+    async (ids: string[]) => {
+      const uniqueIds = [
+        ...new Set(
+          ids.filter(Boolean),
+        ),
+      ];
+
+      const missingIds = uniqueIds.filter(
+        (id) =>
+          !patientCacheRef.current.has(id),
+      );
+
+      if (missingIds.length === 0) {
+        return;
+      }
+
+      const results = await Promise.allSettled(
+        missingIds.map((id) =>
+          getPatient(id),
+        ),
+      );
+
+      const loaded: Patient[] = [];
+
+      results.forEach((result) => {
+        if (
+          result.status === "fulfilled"
+        ) {
+          patientCacheRef.current.set(
+            result.value.id,
+            result.value,
+          );
+          loaded.push(result.value);
+        }
+      });
+
+      if (loaded.length > 0) {
+        setPatientsById((current) => {
+          const next = {
+            ...current,
+          };
+
+          loaded.forEach((patient) => {
+            next[patient.id] = patient;
+          });
+
+          return next;
+        });
+      }
+    },
+    [],
+  );
+
+  const loadDate = useCallback(
+    async (date: string) => {
+      if (!configuration) {
+        return;
+      }
+
+      const requestId =
+        ++loadRequestRef.current;
+
+      setLoading(true);
+      setError(null);
+
+      try {
+        const data =
+          await fetchDayData(date);
+
+        if (
+          requestId !==
+          loadRequestRef.current
+        ) {
+          return;
+        }
+
+        setSelectedDate(date);
+        setDayData(data);
+
+        void loadPatientsForIds(
+          data.appointments.map(
+            (appointment) =>
+              appointment.patientId,
+          ),
+        );
+      } catch (caught) {
+        if (
+          requestId !==
+          loadRequestRef.current
+        ) {
+          return;
+        }
+
+        setError(
+          caught instanceof Error
+            ? caught.message
+            : "Loading the schedule failed.",
+        );
+      } finally {
+        if (
+          requestId ===
+          loadRequestRef.current
+        ) {
+          setLoading(false);
+        }
+      }
+    },
+    [configuration, loadPatientsForIds],
+  );
 
   useEffect(() => {
-    saveScheduleStore({ ...scheduleData, appointments: scheduleAppointments });
-  }, [scheduleAppointments]);
+    let cancelled = false;
 
-  function moveDate(days: number) {
-    setSelectedDate((current) => addDays(current, days));
-  }
+    async function initialize() {
+      setLoading(true);
+      setError(null);
 
-  function handleSlotClick(
-    provider: Provider,
-    minutes: number,
-  ) {
-    if (!isAvailableAt(provider.id, selectedDate, minutes, scheduleData.providerAvailability)) {
+      try {
+        const loadedConfiguration =
+          await getConfiguration();
+
+        if (cancelled) {
+          return;
+        }
+
+        setConfiguration(
+          loadedConfiguration,
+        );
+
+        const initial =
+          await findInitialScheduleData(
+            loadedConfiguration,
+          );
+
+        if (cancelled) {
+          return;
+        }
+
+        setSelectedDate(initial.date);
+        setDayData(initial.data);
+
+        void loadPatientsForIds(
+          initial.data.appointments.map(
+            (appointment) =>
+              appointment.patientId,
+          ),
+        );
+      } catch (caught) {
+        if (!cancelled) {
+          setError(
+            caught instanceof Error
+              ? caught.message
+              : "Loading the schedule failed.",
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    }
+
+    void initialize();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [loadPatientsForIds]);
+
+  useEffect(() => {
+    const contextId = patientContextId;
+
+    if (contextId === null) {
       return;
     }
 
-    const defaultServiceId = provider.serviceIds[0] ?? "";
+    if (patientCacheRef.current.has(contextId)) {
+      return;
+    }
 
-    setCreationError(null);
-    setNewAppointmentDraft({
-      providerId: provider.id,
+    let cancelled = false;
+
+    async function loadContextPatient(id: string) {
+      try {
+        const patient = await getPatient(id);
+
+        if (cancelled) {
+          return;
+        }
+
+        patientCacheRef.current.set(patient.id, patient);
+
+        setPatientsById((current) => ({
+          ...current,
+          [patient.id]: patient,
+        }));
+      } catch {
+        // The scheduling page can still function
+        // without the patient context.
+      }
+    }
+
+    void loadContextPatient(contextId);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [patientContextId]);
+
+  useEffect(() => {
+    if (
+      !modalDraft ||
+      modalDraft.patientId
+    ) {
+      return;
+    }
+
+    if (!patientContextId) {
+      return;
+    }
+
+    setModalDraft((current) =>
+      current
+        ? {
+            ...current,
+            patientId:
+              patientContextId,
+          }
+        : current,
+    );
+  }, [
+    modalDraft,
+    patientContextId,
+  ]);
+
+  useEffect(() => {
+    if (
+      !modalDraft ||
+      !modalDraft.date
+    ) {
+      return;
+    }
+
+    if (
+      modalDraft.date ===
+      selectedDate
+    ) {
+      setModalDayData(dayData);
+      return;
+    }
+
+    let cancelled = false;
+
+    setModalDayLoading(true);
+
+    void fetchDayData(
+      modalDraft.date,
+    )
+      .then((data) => {
+        if (!cancelled) {
+          setModalDayData(data);
+        }
+      })
+      .catch((caught) => {
+        if (!cancelled) {
+          setModalError(
+            caught instanceof Error
+              ? caught.message
+              : "Loading the selected date failed.",
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setModalDayLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    modalDraft?.date,
+    selectedDate,
+    dayData,
+  ]);
+
+  useEffect(() => {
+    if (
+      !modalDraft ||
+      !modalDayData ||
+      !configuration
+    ) {
+      return;
+    }
+
+    const services =
+      getServicesForArea(
+        modalDraft.serviceAreaId,
+        modalDayData,
+        configuration,
+      );
+
+    if (
+      services.length === 0
+    ) {
+      if (modalDraft.serviceId) {
+        setModalDraft((current) =>
+          current
+            ? {
+                ...current,
+                serviceId: "",
+              }
+            : current,
+        );
+      }
+
+      return;
+    }
+
+    const currentStillValid =
+      services.some(
+        (service) =>
+          service.id ===
+          modalDraft.serviceId,
+      );
+
+    if (!currentStillValid) {
+      setModalDraft((current) =>
+        current
+          ? {
+              ...current,
+              serviceId:
+                services[0].id,
+            }
+          : current,
+      );
+    }
+  }, [
+    modalDraft,
+    modalDayData,
+    configuration,
+  ]);
+
+  useEffect(() => {
+    if (
+      !modalDraft ||
+      !patientSearch.trim()
+    ) {
+      setPatientSearchResults([]);
+      setPatientSearchLoading(false);
+      return;
+    }
+
+    if (
+      patientSearch.trim().length < 2
+    ) {
+      setPatientSearchResults([]);
+      return;
+    }
+
+    const controller =
+      new AbortController();
+
+    const timer = window.setTimeout(
+      async () => {
+        setPatientSearchLoading(true);
+
+        try {
+          const patients =
+            await searchPatients(
+              patientSearch.trim(),
+              controller.signal,
+            );
+
+          setPatientSearchResults(
+            patients,
+          );
+        } catch (caught) {
+          if (
+            caught instanceof
+              DOMException &&
+            caught.name ===
+              "AbortError"
+          ) {
+            return;
+          }
+
+          setPatientSearchResults([]);
+        } finally {
+          if (
+            !controller.signal.aborted
+          ) {
+            setPatientSearchLoading(
+              false,
+            );
+          }
+        }
+      },
+      250,
+    );
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [
+    patientSearch,
+    modalDraft,
+  ]);
+
+  function showDragError(
+    message: string,
+  ) {
+    setDragError(message);
+
+    window.setTimeout(() => {
+      setDragError(null);
+    }, 4000);
+  }
+
+  function getPatientName(
+    patientId: string,
+  ): string {
+    const patient =
+      patientsById[patientId];
+
+    if (!patient) {
+      return `Patient ${patientId}`;
+    }
+
+    return `${patient.firstName} ${patient.lastName}`;
+  }
+
+  function getAssignedProvider(
+    areaId: string,
+    data: ScheduleDayData | null,
+  ): Provider | undefined {
+    if (!data || !configuration) {
+      return undefined;
+    }
+
+    return getProviderForArea(
+      areaId,
+      data,
+      configuration,
+    );
+  }
+
+  function getDefaultBookingStatus(
+    patientId: string,
+  ): string {
+    const patient =
+      patientsById[patientId];
+
+    if (
+      patient &&
+      bookingStatuses.some(
+        (status) =>
+          status.id ===
+          patient.bookingStatus,
+      )
+    ) {
+      return patient.bookingStatus;
+    }
+
+    return bookingStatuses[0]?.id ?? "";
+  }
+
+  function openCreateModal(
+    areaId?: string,
+    startMinutes?: number,
+  ) {
+    if (!configuration) {
+      return;
+    }
+
+    const firstArea =
+      areaId ??
+      activeServiceAreas[0]?.id;
+
+    if (!firstArea) {
+      setModalError(
+        "No active service areas are configured.",
+      );
+      return;
+    }
+
+    const services =
+      getServicesForArea(
+        firstArea,
+        dayData,
+        configuration,
+      );
+
+    if (services.length === 0) {
+      setModalError(
+        "This service area does not currently have a provider assigned with an active service.",
+      );
+    } else {
+      setModalError(null);
+    }
+
+    const service =
+      services[0];
+
+    const patientId =
+      patientContextId ?? "";
+
+    setPatientSearch("");
+    setPatientSearchResults([]);
+
+    setModalDayData(dayData);
+
+    setModalDraft({
+      patientId,
+      serviceAreaId: firstArea,
+      serviceId:
+        service?.id ?? "",
       date: selectedDate,
-      startMinutes: minutes,
-      patientId: schedulingPatient?.id ?? "",
-      serviceId: defaultServiceId,
+      startMinutes:
+        startMinutes ??
+        DAY_START,
+      durationMinutes:
+        service
+          ? Math.max(
+              SLOT_MINUTES,
+              service.defaultDurationMinutes,
+            )
+          : SLOT_MINUTES,
+      bookingStatus:
+        getDefaultBookingStatus(
+          patientId,
+        ),
     });
   }
 
-  function handleAppointmentDragStart(
-    event: React.PointerEvent,
+  function openEditModal(
     appointment: Appointment,
   ) {
-    event.stopPropagation();
+    setPatientSearch("");
+    setPatientSearchResults([]);
+    setModalError(null);
 
-    setDraggingAppointmentId(appointment.id);
+    setModalDayData(dayData);
 
-    dragStartYRef.current = event.clientY;
-    dragStartXRef.current = event.clientX;
-
-    originalStartMinutesRef.current =
-      appointment.startMinutes;
-
-    originalProviderIdRef.current =
-      appointment.providerId;
-
-    dragModeRef.current = null;
-    hasDraggedRef.current = false;
-    invalidDragMessageRef.current = null;
-
-    setDragError(null);
-
-    event.currentTarget.setPointerCapture(event.pointerId);
+    setModalDraft({
+      id: appointment.id,
+      patientId:
+        appointment.patientId,
+      serviceAreaId:
+        appointment.serviceAreaId,
+      serviceId:
+        appointment.serviceId,
+      date:
+        appointment.date,
+      startMinutes:
+        appointment.startMinutes,
+      durationMinutes:
+        appointment.durationMinutes,
+      bookingStatus:
+        appointment.bookingStatus,
+    });
   }
 
-  function getProviderFromPointer(
-    event: React.PointerEvent,
-  ): Provider | null {
-    const element = document.elementFromPoint(
-      event.clientX,
-      event.clientY,
-    );
-
-    const column = element?.closest(
-      "[data-provider-id]",
-    );
-
-    if (!column) {
-      return null;
+  function closeModal() {
+    if (saving) {
+      return;
     }
 
-    const providerId =
-      column.getAttribute("data-provider-id");
+    setModalDraft(null);
+    setModalDayData(null);
+    setModalError(null);
+    setPatientSearch("");
+    setPatientSearchResults([]);
+  }
 
-    if (!providerId) {
-      return null;
+  async function saveDraft() {
+    if (
+      !modalDraft ||
+      !modalDayData ||
+      !configuration
+    ) {
+      return;
     }
+
+    if (
+      !modalDraft.patientId ||
+      !modalDraft.serviceAreaId ||
+      !modalDraft.serviceId ||
+      !modalDraft.bookingStatus
+    ) {
+      setModalError(
+        "Patient, service area, service, and booking status are required.",
+      );
+      return;
+    }
+
+    if (
+      modalDraft.startMinutes <
+        DAY_START ||
+      modalDraft.startMinutes +
+        modalDraft.durationMinutes >
+        DAY_END
+    ) {
+      setModalError(
+        "The appointment must fit within the clinic schedule.",
+      );
+      return;
+    }
+
+    if (
+      !isRangeAvailable(
+        modalDraft.serviceAreaId,
+        modalDraft.serviceId,
+        modalDraft.startMinutes,
+        modalDraft.durationMinutes,
+        modalDayData,
+        configuration,
+        modalDraft.id,
+      )
+    ) {
+      setModalError(
+        "That time is not available for this service area and provider. Please choose another time.",
+      );
+      return;
+    }
+
+    setSaving(true);
+    setModalError(null);
+
+    try {
+      if (modalDraft.id) {
+        await updateAppointment(
+          modalDraft.id,
+          {
+            patientId:
+              modalDraft.patientId,
+            serviceAreaId:
+              modalDraft.serviceAreaId,
+            serviceId:
+              modalDraft.serviceId,
+            date:
+              modalDraft.date,
+            startMinutes:
+              modalDraft.startMinutes,
+            durationMinutes:
+              modalDraft.durationMinutes,
+            bookingStatus:
+              modalDraft.bookingStatus,
+          },
+        );
+      } else {
+        await createAppointment({
+          patientId:
+            modalDraft.patientId,
+          serviceAreaId:
+            modalDraft.serviceAreaId,
+          serviceId:
+            modalDraft.serviceId,
+          date:
+            modalDraft.date,
+          startMinutes:
+            modalDraft.startMinutes,
+          durationMinutes:
+            modalDraft.durationMinutes,
+          bookingStatus:
+            modalDraft.bookingStatus,
+        });
+      }
+
+      closeModal();
+      await loadDate(
+        modalDraft.date,
+      );
+    } catch (caught) {
+      setModalError(
+        caught instanceof Error
+          ? caught.message
+          : "Saving the appointment failed.",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function removeAppointment() {
+    if (!modalDraft?.id) {
+      return;
+    }
+
+    const confirmed =
+      window.confirm(
+        "Delete this appointment?",
+      );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setSaving(true);
+    setModalError(null);
+
+    try {
+      await deleteAppointment(
+        modalDraft.id,
+      );
+
+      const date =
+        modalDraft.date;
+
+      closeModal();
+      await loadDate(date);
+    } catch (caught) {
+      setModalError(
+        caught instanceof Error
+          ? caught.message
+          : "Deleting the appointment failed.",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveDraggedAppointment(
+    appointment: Appointment,
+    serviceAreaId: string,
+    startMinutes: number,
+    durationMinutes: number,
+  ) {
+    if (!configuration) {
+      return;
+    }
+
+    const nextData =
+      serviceAreaId ===
+        appointment.serviceAreaId
+        ? dayData
+        : dayData;
+
+    if (
+      !isRangeAvailable(
+        serviceAreaId,
+        appointment.serviceId,
+        startMinutes,
+        durationMinutes,
+        nextData,
+        configuration,
+        appointment.id,
+      )
+    ) {
+      showDragError(
+        "That appointment cannot be placed there because the time is unavailable or conflicts with another appointment.",
+      );
+      return;
+    }
+
+    try {
+      await updateAppointment(
+        appointment.id,
+        {
+          patientId:
+            appointment.patientId,
+          serviceAreaId,
+          serviceId:
+            appointment.serviceId,
+          date:
+            appointment.date,
+          startMinutes,
+          durationMinutes,
+          bookingStatus:
+            appointment.bookingStatus,
+        },
+      );
+
+      await loadDate(
+        appointment.date,
+      );
+    } catch (caught) {
+      showDragError(
+        caught instanceof Error
+          ? caught.message
+          : "Moving the appointment failed.",
+      );
+    }
+  }
+
+  function getColumnAtPoint(
+    x: number,
+    y: number,
+  ): HTMLElement | null {
+    const element =
+      document.elementFromPoint(
+        x,
+        y,
+      );
 
     return (
-      providers.find(
-        (provider) => provider.id === providerId,
+      element?.closest<HTMLElement>(
+        ".service-area-column",
       ) ?? null
     );
   }
 
-  function handleAppointmentResizeStart(
-    event: React.PointerEvent,
-    appointment: Appointment,
-  ) {
-    event.stopPropagation();
-
-    setResizingAppointmentId(appointment.id);
-
-    resizeStartYRef.current = event.clientY;
-    originalDurationRef.current = appointment.durationMinutes;
-
-    event.currentTarget.setPointerCapture(event.pointerId);
-  }
-
-  function handlePointerMove(event: React.PointerEvent) {
-    if (
-      draggingAppointmentId &&
-      dragStartYRef.current !== null &&
-      dragStartXRef.current !== null
-    ) {
-      const deltaX =
-        event.clientX - dragStartXRef.current;
-
-      const deltaY =
-        event.clientY - dragStartYRef.current;
-
-      const distance = Math.sqrt(
-        deltaX * deltaX + deltaY * deltaY,
+  function getColumnByAreaId(
+    areaId: string,
+  ): HTMLElement | null {
+    const columns =
+      document.querySelectorAll<HTMLElement>(
+        ".service-area-column",
       );
 
-      /*
-      * Ignore tiny pointer movements.
-      * This prevents a simple click from becoming
-      * a drag.
-      */
+    for (const column of columns) {
       if (
-        !hasDraggedRef.current &&
-        distance < 8
+        column.dataset.serviceAreaId ===
+        areaId
       ) {
-        return;
-      }
-
-      hasDraggedRef.current = true;
-
-      /*
-      * Once the user moves far enough, decide whether
-      * this drag is primarily vertical or horizontal.
-      *
-      * Once chosen, the direction stays locked for
-      * the remainder of this drag.
-      */
-      if (dragModeRef.current === null) {
-        dragModeRef.current =
-          Math.abs(deltaX) > Math.abs(deltaY)
-            ? "horizontal"
-            : "vertical";
-      }
-
-      if (dragModeRef.current === "vertical") {
-        handleAppointmentMove(event);
-        return;
-      }
-
-      if (dragModeRef.current === "horizontal") {
-        handleProviderDrag(event);
-        return;
+        return column;
       }
     }
 
-    if (
-      resizingAppointmentId &&
-      resizeStartYRef.current !== null &&
-      originalDurationRef.current !== null
-    ) {
-      handleAppointmentResize(event);
-    }
+    return null;
   }
 
-  function handleProviderDrag(
-    event: React.PointerEvent,
-  ) {
-    if (!draggingAppointmentId) {
-      return;
-    }
+  function getStartMinutesFromPointer(
+    pointerY: number,
+    column: HTMLElement,
+    durationMinutes: number,
+  ): number {
+    const rect =
+      column.getBoundingClientRect();
 
-    const appointment = scheduleAppointments.find(
-      (item) => item.id === draggingAppointmentId,
-    );
+    const rawMinutes =
+      DAY_START +
+      ((pointerY - rect.top) /
+        SLOT_HEIGHT) *
+        SLOT_MINUTES;
 
-    if (!appointment) {
-      return;
-    }
+    const rounded =
+      roundToSlot(rawMinutes);
 
-    const targetProvider =
-      getProviderFromPointer(event);
-
-    if (!targetProvider) {
-      return;
-    }
-
-    if (targetProvider.id === appointment.providerId) {
-      setDragError(null);
-      invalidDragMessageRef.current = null;
-      return;
-    }
-
-    /*
-    * Check whether the destination provider can perform
-    * this appointment's service.
-    */
-    if (
-      !hasService(
-        targetProvider,
-        appointment.serviceId,
-      )
-    ) {
-      const service = getService(
-        appointment.serviceId,
-      );
-
-      const message =
-        `${targetProvider.name} does not provide ` +
-        `${service?.name ?? "this service"}.`;
-
-      setDragError(message);
-      invalidDragMessageRef.current = message;
-
-      return;
-    }
-
-    /*
-    * Check whether the destination provider already
-    * has an appointment during this time.
-    */
-    if (
-      hasAppointmentConflict(
-        appointment,
-        targetProvider.id,
-        appointment.startMinutes,
-      )
-    ) {
-      const message =
-        `${targetProvider.name} already has an ` +
-        `appointment during this time.`;
-
-      setDragError(message);
-      invalidDragMessageRef.current = message;
-
-      return;
-    }
-
-    /*
-    * Valid destination.
-    *
-    * We don't open the confirmation dialog yet.
-    * We wait until the user releases the appointment.
-    */
-    setDragError(null);
-    invalidDragMessageRef.current = null;
-
-    setPendingProviderMove({
-      appointmentId: appointment.id,
-      fromProviderId: appointment.providerId,
-      toProviderId: targetProvider.id,
-    });
-  }
-
-  function handleAppointmentMove(event: React.PointerEvent) {
-    if (
-      !draggingAppointmentId ||
-      dragStartYRef.current === null ||
-      originalStartMinutesRef.current === null
-    ) {
-      return;
-    }
-
-    const appointment = scheduleAppointments.find(
-      (item) => item.id === draggingAppointmentId,
-    );
-
-    if (!appointment) {
-      return;
-    }
-
-    const deltaPixels =
-      event.clientY - dragStartYRef.current;
-
-    const deltaSlots = Math.round(
-      deltaPixels / SLOT_HEIGHT,
-    );
-
-    const proposedStartMinutes =
-      originalStartMinutesRef.current +
-      deltaSlots * SLOT_MINUTES;
-
-    /*
-    * Find the availability block that contains the proposed
-    * appointment start.
-    *
-    * We intentionally do NOT fall back to the original block.
-    * This allows providers to have multiple availability blocks
-    * in one day, such as:
-    *
-    * 8:00 AM - 12:00 PM
-    * 1:00 PM - 5:00 PM
-    */
-    const availability =
-      getAvailabilityBlockForStart(
-        appointment.providerId,
-        selectedDate,
-        proposedStartMinutes,
-        scheduleData.providerAvailability,
-      );
-
-    /*
-    * Don't allow an appointment to move into a break,
-    * lunch, or unavailable period.
-    */
-    if (!availability) {
-      return;
-    }
-
-    /*
-    * The appointment must fit completely inside the
-    * availability block.
-    */
-    const latestStart =
-      availability.endMinutes -
-      appointment.durationMinutes;
-
-    if (proposedStartMinutes > latestStart) {
-      return;
-    }
-
-    /*
-    * The proposed position is valid.
-    */
-    setScheduleAppointments((current) =>
-      current.map((item) =>
-        item.id === appointment.id
-          ? {
-              ...item,
-              startMinutes: proposedStartMinutes,
-            }
-          : item,
+    return Math.max(
+      DAY_START,
+      Math.min(
+        DAY_END - durationMinutes,
+        rounded,
       ),
+    );
+  }
+
+  function getPreviewValidity(
+    interaction: DragInteraction,
+    targetAreaId: string,
+    targetStartMinutes: number,
+    targetDurationMinutes: number,
+  ): boolean {
+    if (!configuration) {
+      return false;
+    }
+
+    return isRangeAvailable(
+      targetAreaId,
+      interaction.appointment.serviceId,
+      targetStartMinutes,
+      targetDurationMinutes,
+      dayData,
+      configuration,
+      interaction.appointment.id,
+    );
+  }
+
+  function handleInteractionMove(
+    event: PointerEvent,
+  ) {
+    const interaction =
+      interactionRef.current;
+
+    if (!interaction) {
+      return;
+    }
+
+    const deltaX =
+      event.clientX -
+      interaction.pointerStartX;
+
+    const deltaY =
+      event.clientY -
+      interaction.pointerStartY;
+
+    if (
+      Math.abs(deltaX) > 4 ||
+      Math.abs(deltaY) > 4
+    ) {
+      interaction.moved = true;
+    }
+
+    if (!interaction.moved) {
+      return;
+    }
+
+    if (
+      interaction.mode === "resize"
+    ) {
+      const column =
+        getColumnByAreaId(
+          interaction.originalServiceAreaId,
+        );
+
+      if (!column) {
+        return;
+      }
+
+      const endMinutesRaw =
+        DAY_START +
+        ((event.clientY -
+          column.getBoundingClientRect()
+            .top) /
+          SLOT_HEIGHT) *
+          SLOT_MINUTES;
+
+      const roundedEnd =
+        roundToSlot(endMinutesRaw);
+
+      const duration = Math.max(
+        SLOT_MINUTES,
+        Math.min(
+          DAY_END -
+            interaction.originalStartMinutes,
+          roundedEnd -
+            interaction.originalStartMinutes,
+        ),
+      );
+
+      (
+        interaction as DragInteraction & {
+          previewDurationMinutes?: number;
+        }
+      ).previewDurationMinutes =
+        duration;
+
+      setActiveInteractionAppointmentId(
+        interaction.appointment.id,
+      );
+
+      return;
+    }
+
+    const targetColumn =
+      getColumnAtPoint(
+        event.clientX,
+        event.clientY,
+      );
+
+    const targetAreaId =
+      targetColumn?.dataset
+        .serviceAreaId ??
+      interaction.originalServiceAreaId;
+
+    const column =
+      targetColumn ??
+      getColumnByAreaId(
+        interaction.originalServiceAreaId,
+      );
+
+    if (!column) {
+      return;
+    }
+
+    const targetStartMinutes =
+      getStartMinutesFromPointer(
+        event.clientY,
+        column,
+        interaction.originalDurationMinutes,
+      );
+
+    const valid =
+      getPreviewValidity(
+        interaction,
+        targetAreaId,
+        targetStartMinutes,
+        interaction.originalDurationMinutes,
+      );
+
+    (
+      interaction as DragInteraction & {
+        previewAreaId?: string;
+        previewStartMinutes?: number;
+        previewValid?: boolean;
+      }
+    ).previewAreaId =
+      targetAreaId;
+
+    (
+      interaction as DragInteraction & {
+        previewAreaId?: string;
+        previewStartMinutes?: number;
+        previewValid?: boolean;
+      }
+    ).previewStartMinutes =
+      targetStartMinutes;
+
+    (
+      interaction as DragInteraction & {
+        previewAreaId?: string;
+        previewStartMinutes?: number;
+        previewValid?: boolean;
+      }
+    ).previewValid = valid;
+
+    setActiveInteractionAppointmentId(
+      interaction.appointment.id,
+    );
+  }
+
+  function handleInteractionEnd(
+    event: PointerEvent,
+    moveHandler: (
+      event: PointerEvent,
+    ) => void,
+    upHandler: (
+      event: PointerEvent,
+    ) => void,
+  ) {
+    window.removeEventListener(
+      "pointermove",
+      moveHandler,
+    );
+
+    window.removeEventListener(
+      "pointerup",
+      upHandler,
+    );
+
+    document.body.style.userSelect =
+      "";
+
+    const interaction =
+      interactionRef.current;
+
+    interactionRef.current = null;
+    setActiveInteractionAppointmentId(
+      null,
+    );
+
+    if (!interaction) {
+      return;
+    }
+
+    if (
+      interaction.mode === "resize"
+    ) {
+      if (!interaction.moved) {
+        clickSuppressedRef.current =
+          true;
+        return;
+      }
+
+      clickSuppressedRef.current =
+        true;
+
+      const previewDuration =
+        (
+          interaction as DragInteraction & {
+            previewDurationMinutes?: number;
+          }
+        ).previewDurationMinutes ??
+        interaction.originalDurationMinutes;
+
+      if (
+        !getPreviewValidity(
+          interaction,
+          interaction.originalServiceAreaId,
+          interaction.originalStartMinutes,
+          previewDuration,
+        )
+      ) {
+        showDragError(
+          "The appointment cannot be resized into that time because it is unavailable or conflicts with another appointment.",
+        );
+        return;
+      }
+
+      void saveDraggedAppointment(
+        interaction.appointment,
+        interaction.originalServiceAreaId,
+        interaction.originalStartMinutes,
+        previewDuration,
+      );
+
+      return;
+    }
+
+    if (!interaction.moved) {
+      clickSuppressedRef.current =
+        false;
+      return;
+    }
+
+    clickSuppressedRef.current =
+      true;
+
+    const targetAreaId =
+      (
+        interaction as DragInteraction & {
+          previewAreaId?: string;
+        }
+      ).previewAreaId ??
+      interaction.originalServiceAreaId;
+
+    const targetStart =
+      (
+        interaction as DragInteraction & {
+          previewStartMinutes?: number;
+        }
+      ).previewStartMinutes ??
+      interaction.originalStartMinutes;
+
+    const valid =
+      (
+        interaction as DragInteraction & {
+          previewValid?: boolean;
+        }
+      ).previewValid ?? false;
+
+    /*
+     * Crucially, an invalid drop is never allowed
+     * to preview as a valid movement and is rejected
+     * before anything is saved.
+     */
+    if (!valid) {
+      showDragError(
+        "That appointment cannot be moved there because the time is unavailable or conflicts with another appointment.",
+      );
+      return;
+    }
+
+    if (
+      targetAreaId !==
+      interaction.originalServiceAreaId
+    ) {
+      setPendingMove({
+        appointment:
+          interaction.appointment,
+        serviceAreaId:
+          targetAreaId,
+        startMinutes:
+          targetStart,
+      });
+
+      return;
+    }
+
+    void saveDraggedAppointment(
+      interaction.appointment,
+      targetAreaId,
+      targetStart,
+      interaction.originalDurationMinutes,
+    );
+
+    void event;
+  }
+
+  function beginAppointmentInteraction(
+    event: ReactPointerEvent<HTMLElement>,
+    appointment: Appointment,
+    mode: "drag" | "resize",
+  ) {
+    if (
+      event.button !== 0 &&
+      event.pointerType !== "touch"
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+
+    if (mode === "resize") {
+      event.stopPropagation();
+    }
+
+    document.body.style.userSelect =
+      "none";
+
+    const interaction: DragInteraction =
+      {
+        mode,
+        appointment,
+        pointerStartX:
+          event.clientX,
+        pointerStartY:
+          event.clientY,
+        originalStartMinutes:
+          appointment.startMinutes,
+        originalDurationMinutes:
+          appointment.durationMinutes,
+        originalServiceAreaId:
+          appointment.serviceAreaId,
+        moved: false,
+      };
+
+    interactionRef.current =
+      interaction;
+
+    setActiveInteractionAppointmentId(
+      appointment.id,
+    );
+
+    let moveHandler: (
+      event: PointerEvent,
+    ) => void;
+
+    let upHandler: (
+      event: PointerEvent,
+    ) => void;
+
+    moveHandler = (
+      nativeEvent: PointerEvent,
+    ) => {
+      handleInteractionMove(
+        nativeEvent,
+      );
+    };
+
+    upHandler = (
+      nativeEvent: PointerEvent,
+    ) => {
+      handleInteractionEnd(
+        nativeEvent,
+        moveHandler,
+        upHandler,
+      );
+    };
+
+    window.addEventListener(
+      "pointermove",
+      moveHandler,
+    );
+
+    window.addEventListener(
+      "pointerup",
+      upHandler,
     );
   }
 
   function handleAppointmentClick(
-    event: React.MouseEvent,
     appointment: Appointment,
   ) {
-    event.stopPropagation();
-
-    /*
-    * A drag should never also count as a click.
-    */
-    if (hasDraggedRef.current) {
+    if (clickSuppressedRef.current) {
+      clickSuppressedRef.current =
+        false;
       return;
     }
 
-    setSelectedAppointment(appointment);
+    openEditModal(appointment);
   }
 
-  function handleAppointmentResize(
-    event: React.PointerEvent,
-  ) {
-    if (
-      !resizingAppointmentId ||
-      resizeStartYRef.current === null ||
-      originalDurationRef.current === null
-    ) {
+  function confirmPendingMove() {
+    if (!pendingMove) {
       return;
     }
 
-    const appointment = scheduleAppointments.find(
-      (item) => item.id === resizingAppointmentId,
-    );
+    const move =
+      pendingMove;
 
-    if (!appointment) {
-      return;
-    }
+    setPendingMove(null);
 
-    const deltaPixels =
-      event.clientY - resizeStartYRef.current;
-
-    const deltaSlots = Math.round(
-      deltaPixels / SLOT_HEIGHT,
-    );
-
-    const newDuration =
-      originalDurationRef.current +
-      deltaSlots * SLOT_MINUTES;
-
-    const availability = getAvailabilityBlockForStart(
-      appointment.providerId,
-      selectedDate,
-      appointment.startMinutes,
-      scheduleData.providerAvailability,
-    );
-
-    if (!availability) {
-      return;
-    }
-
-    const maximumDuration =
-      availability.endMinutes - appointment.startMinutes;
-
-    const clampedDuration = Math.max(
-      SLOT_MINUTES,
-      Math.min(newDuration, maximumDuration),
-    );
-
-    setScheduleAppointments((current) =>
-      current.map((item) =>
-        item.id === appointment.id
-          ? {
-              ...item,
-              durationMinutes: clampedDuration,
-            }
-          : item,
-      ),
+    void saveDraggedAppointment(
+      move.appointment,
+      move.serviceAreaId,
+      move.startMinutes,
+      move.appointment.durationMinutes,
     );
   }
 
-  function handlePointerUp() {
-    /*
-    * If this was a horizontal drag with a valid target,
-    * the confirmation modal will now appear because
-    * draggingAppointmentId is being cleared.
-    */
-    setDraggingAppointmentId(null);
-    setResizingAppointmentId(null);
-
-    dragStartYRef.current = null;
-    dragStartXRef.current = null;
-
-    originalStartMinutesRef.current = null;
-    originalProviderIdRef.current = null;
-
-    resizeStartYRef.current = null;
-    originalDurationRef.current = null;
-
-    dragModeRef.current = null;
-    hasDraggedRef.current = false;
-    invalidDragMessageRef.current = null;
-
-    /*
-    * Don't clear pendingProviderMove here.
-    * A valid horizontal move needs it for the
-    * confirmation dialog.
-    */
+  function cancelPendingMove() {
+    setPendingMove(null);
   }
 
-  function confirmProviderMove() {
-    if (!pendingProviderMove) {
-      return;
-    }
-
-    const {
-      appointmentId,
-      toProviderId,
-    } = pendingProviderMove;
-
-    setScheduleAppointments((current) =>
-      current.map((appointment) =>
-        appointment.id === appointmentId
-          ? {
-              ...appointment,
-              providerId: toProviderId,
-            }
-          : appointment,
-      ),
-    );
-
-    setPendingProviderMove(null);
-  }
-
-  function hasAppointmentConflict(
-    appointment: Appointment,
-    providerId: string,
-    startMinutes: number,
-    date: string = selectedDate,
-  ): boolean {
-    const endMinutes =
-      startMinutes + appointment.durationMinutes;
-
-    return scheduleAppointments.some((other) => {
-      if (other.id === appointment.id) {
-        return false;
-      }
-
-      if (other.date !== date) {
-        return false;
-      }
-
-      if (other.providerId !== providerId) {
-        return false;
-      }
-
-      const otherEnd =
-        other.startMinutes + other.durationMinutes;
-
-      return (
-        startMinutes < otherEnd &&
-        endMinutes > other.startMinutes
+  function clearPatientContext() {
+    const next =
+      new URLSearchParams(
+        searchParams,
       );
-    });
+
+    next.delete("patientId");
+
+    setSearchParams(next);
   }
 
-  function cancelProviderMove() {
-    setPendingProviderMove(null);
+  function handleDraftDateChange(
+    date: string,
+  ) {
+    setModalError(null);
+
+    setModalDraft((current) =>
+      current
+        ? {
+            ...current,
+            date,
+          }
+        : current,
+    );
+
+    if (date === selectedDate) {
+      setModalDayData(dayData);
+      return;
+    }
+
+    setModalDayLoading(true);
+
+    void fetchDayData(date)
+      .then((data) => {
+        setModalDayData(data);
+      })
+      .catch((caught) => {
+        setModalError(
+          caught instanceof Error
+            ? caught.message
+            : "Loading the selected date failed.",
+        );
+      })
+      .finally(() => {
+        setModalDayLoading(false);
+      });
   }
+
+  function handleDraftAreaChange(
+    serviceAreaId: string,
+  ) {
+    if (!modalDraft || !modalDayData) {
+      return;
+    }
+
+    const services =
+      configuration
+        ? getServicesForArea(
+            serviceAreaId,
+            modalDayData,
+            configuration,
+          )
+        : [];
+
+    const currentServiceStillValid =
+      services.some(
+        (service) =>
+          service.id ===
+          modalDraft.serviceId,
+      );
+
+    setModalDraft({
+      ...modalDraft,
+      serviceAreaId,
+      serviceId:
+        currentServiceStillValid
+          ? modalDraft.serviceId
+          : services[0]?.id ?? "",
+    });
+
+    setModalError(null);
+  }
+
+  if (loading && !configuration) {
+    return (
+      <div className="schedule-page">
+        <div className="schedule-header">
+          <div>
+            <span className="schedule-eyebrow">
+              Clinic Schedule
+            </span>
+            <h1>Schedule</h1>
+          </div>
+        </div>
+
+        <div className="schedule-calendar">
+          <div className="schedule-loading">
+            Loading schedule…
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (error && !configuration) {
+    return (
+      <div className="schedule-page">
+        <div className="schedule-header">
+          <div>
+            <span className="schedule-eyebrow">
+              Clinic Schedule
+            </span>
+            <h1>Schedule</h1>
+          </div>
+        </div>
+
+        <div className="schedule-form-error">
+          {error}
+        </div>
+      </div>
+    );
+  }
+
+  if (!configuration) {
+    return null;
+  }
+
+  const selectedPatient =
+    patientContextId
+      ? patientsById[
+          patientContextId
+        ]
+      : undefined;
+
+  const gridStyle = {
+    "--service-area-count":
+      Math.max(
+        activeServiceAreas.length,
+        1,
+      ),
+  } as CSSProperties;
+
+  const interaction =
+    interactionRef.current;
+
+  const previewAppointmentId =
+    activeInteractionAppointmentId;
+
+  const previewAreaId =
+    interaction &&
+    interaction.mode === "drag"
+      ? (
+          interaction as DragInteraction & {
+            previewAreaId?: string;
+          }
+        ).previewAreaId
+      : undefined;
+
+  const previewStartMinutes =
+    interaction &&
+    interaction.mode === "drag"
+      ? (
+          interaction as DragInteraction & {
+            previewStartMinutes?: number;
+          }
+        ).previewStartMinutes
+      : undefined;
+
+  const previewValid =
+    interaction &&
+    interaction.mode === "drag"
+      ? (
+          interaction as DragInteraction & {
+            previewValid?: boolean;
+          }
+        ).previewValid
+      : false;
+
+  const previewDuration =
+    interaction &&
+    interaction.mode === "resize"
+      ? (
+          interaction as DragInteraction & {
+            previewDurationMinutes?: number;
+          }
+        ).previewDurationMinutes ??
+        interaction.originalDurationMinutes
+      : interaction?.originalDurationMinutes;
 
   return (
-    <div
-      className="schedule-page"
-      onPointerMove={handlePointerMove}
-      onPointerUp={handlePointerUp}
-    >
-    {dragError && draggingAppointmentId && (
-      <div
-        className="schedule-drag-error"
-        role="alert"
-      >
-        {dragError}
-      </div>
-    )}
-      <header className="schedule-header">
+    <div className="schedule-page">
+      <div className="schedule-header">
         <div>
-          <span className="schedule-eyebrow">Appointments</span>
+          <span className="schedule-eyebrow">
+            Clinic Schedule
+          </span>
           <h1>Schedule</h1>
         </div>
 
         <div className="schedule-controls">
           <button
             type="button"
-            className="secondary-button"
-            onClick={() => setSelectedDate(toDateString(new Date()))}
-          >
-            Today
-          </button>
-
-          <button
-            type="button"
             className="icon-button"
-            onClick={() => moveDate(-1)}
+            onClick={() =>
+              void loadDate(
+                addDays(
+                  selectedDate,
+                  -1,
+                ),
+              )
+            }
             aria-label="Previous day"
           >
             ‹
           </button>
 
           <input
+            className="date-picker"
             type="date"
             value={selectedDate}
-            onChange={(event) => setSelectedDate(event.target.value)}
-            className="date-picker"
+            onChange={(event) =>
+              void loadDate(
+                event.target.value,
+              )
+            }
           />
 
           <button
             type="button"
             className="icon-button"
-            onClick={() => moveDate(1)}
+            onClick={() =>
+              void loadDate(
+                addDays(
+                  selectedDate,
+                  1,
+                ),
+              )
+            }
             aria-label="Next day"
           >
             ›
           </button>
+
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() =>
+              void loadDate(
+                todayString(),
+              )
+            }
+          >
+            Today
+          </button>
+
+          <button
+            type="button"
+            className="primary-button"
+            onClick={() =>
+              openCreateModal()
+            }
+          >
+            Add Appointment
+          </button>
         </div>
-      </header>
+      </div>
 
       <div className="schedule-date">
         {formatDate(selectedDate)}
       </div>
 
-      {schedulingPatient && (
-        <div className="schedule-patient-context" role="status">
+      {patientContextId && (
+        <div className="schedule-patient-context">
           <div>
-            <span className="schedule-patient-context-label">Scheduling patient</span>
+            <span className="schedule-patient-context-label">
+              Scheduling patient
+            </span>
+
             <strong>
-              {schedulingPatient.firstName} {schedulingPatient.lastName}
+              {selectedPatient
+                ? `${selectedPatient.firstName} ${selectedPatient.lastName}`
+                : "Loading patient…"}
             </strong>
           </div>
 
           <button
             type="button"
             className="schedule-patient-context-clear"
-            onClick={() => {
-              setSearchParams({}, { replace: true });
-            }}
+            onClick={
+              clearPatientContext
+            }
           >
             Clear patient
           </button>
         </div>
       )}
 
-      <section className="schedule-calendar">
-        <div
-          className="schedule-grid"
-          style={{
-            "--provider-count": clinicProviders.length,
-          } as React.CSSProperties}
-        >
-          <div className="time-column-header" />
+      {error && (
+        <div className="schedule-form-error">
+          {error}
+        </div>
+      )}
 
-          {clinicProviders.map((provider, index) => (
-             <div
-              className="provider-header"
-              key={provider.id}
-              style={{ gridColumn: index + 2 }}
-            >
-              <strong>{provider.name}</strong>
-
-              <div className="provider-services">
-                {provider.serviceIds.map((serviceId, index) => {
-                  const service = getService(serviceId);
-
-                  if (!service) {
-                    return null;
-                  }
-
-                  return (
-                    <span
-                      className={
-                        index === 0
-                          ? "provider-service primary"
-                          : "provider-service"
-                      }
-                      key={service.id}
-                    >
-                      {service.name}
-                    </span>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
-
+      {activeServiceAreas.length ===
+      0 ? (
+        <div className="schedule-calendar">
+          <div className="schedule-empty">
+            No active service areas are configured.
+          </div>
+        </div>
+      ) : (
+        <div className="schedule-calendar">
           <div
-            className="time-column"
-            style={{ gridColumn: 1, gridRow: 2 }}
+            className="schedule-grid"
+            style={gridStyle}
           >
-            {Array.from(
-              {
-                length:
-                  (DAY_END - DAY_START) / SLOT_MINUTES,
-              },
-              (_, index) => {
-                const minutes =
-                  DAY_START + index * SLOT_MINUTES;
+            <div className="time-column-header" />
+
+            {activeServiceAreas.map(
+              (area) => {
+                const assignment =
+                  dayData.assignments.find(
+                    (item) =>
+                      item.serviceAreaId ===
+                      area.id,
+                  );
+
+                const provider =
+                  assignment
+                    ? providerById.get(
+                        assignment.providerId,
+                      )
+                    : undefined;
+
+                const providerServices =
+                  provider
+                    ? provider.serviceIds
+                        .map((id) =>
+                          serviceById.get(
+                            id,
+                          ),
+                        )
+                        .filter(
+                          (
+                            service,
+                          ): service is Service =>
+                            Boolean(
+                              service?.active,
+                            ),
+                        )
+                        .sort(
+                          (
+                            a,
+                            b,
+                          ) =>
+                            a.displayOrder -
+                            b.displayOrder,
+                        )
+                    : [];
 
                 return (
-                  <div className="time-label" key={minutes}>
-                    {minutes % 60 === 0 ? formatTime(minutes) : ""}
+                  <div
+                    key={area.id}
+                    className="service-area-header"
+                  >
+                    <strong>
+                      {area.name}
+                    </strong>
+
+                    <div className="service-area-provider">
+                      {provider
+                        ? provider.name
+                        : "No provider assigned"}
+                    </div>
+
+                    {providerServices.length >
+                      0 && (
+                      <div className="service-area-services">
+                        {providerServices.map(
+                          (
+                            service,
+                            index,
+                          ) => (
+                            <span
+                              key={
+                                service.id
+                              }
+                              className={`service-area-service ${
+                                index ===
+                                0
+                                  ? "primary"
+                                  : ""
+                              }`}
+                            >
+                              {
+                                service.name
+                              }
+                            </span>
+                          ),
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              },
+            )}
+
+            <div className="time-column">
+              {Array.from(
+                {
+                  length:
+                    (DAY_END -
+                      DAY_START) /
+                    SLOT_MINUTES,
+                },
+                (_, index) => {
+                  const minutes =
+                    DAY_START +
+                    index *
+                      SLOT_MINUTES;
+
+                  return (
+                    <div
+                      key={minutes}
+                      className="time-label"
+                    >
+                      {minutes %
+                        60 ===
+                      0
+                        ? formatTime(
+                            minutes,
+                          )
+                        : ""}
+                    </div>
+                  );
+                },
+              )}
+            </div>
+
+            {activeServiceAreas.map(
+              (area) => {
+                const assignment =
+                  dayData.assignments.find(
+                    (item) =>
+                      item.serviceAreaId ===
+                      area.id,
+                  );
+
+                const provider =
+                  assignment
+                    ? providerById.get(
+                        assignment.providerId,
+                      )
+                    : undefined;
+
+                const areaAppointments =
+                  dayData.appointments.filter(
+                    (appointment) =>
+                      appointment.serviceAreaId ===
+                      area.id,
+                  );
+
+                const availability =
+                  provider
+                    ? dayData.availability.find(
+                        (item) =>
+                          item.providerId ===
+                          provider.id,
+                      )
+                    : undefined;
+
+                return (
+                  <div
+                    key={area.id}
+                    className="service-area-column"
+                    data-service-area-id={
+                      area.id
+                    }
+                  >
+                    {Array.from(
+                      {
+                        length:
+                          (DAY_END -
+                            DAY_START) /
+                          SLOT_MINUTES,
+                      },
+                      (_, index) => {
+                        const start =
+                          DAY_START +
+                          index *
+                            SLOT_MINUTES;
+
+                        const hasAvailability =
+                          Boolean(
+                            provider &&
+                              availability?.blocks.some(
+                                (
+                                  block,
+                                ) =>
+                                  start >=
+                                    block.startMinutes &&
+                                  start +
+                                    SLOT_MINUTES <=
+                                    block.endMinutes,
+                              ),
+                          );
+
+                        const hasAnyService =
+                          provider
+                            ? getServicesForArea(
+                                area.id,
+                                dayData,
+                                configuration,
+                              ).some(
+                                (
+                                  service,
+                                ) =>
+                                  isRangeAvailable(
+                                    area.id,
+                                    service.id,
+                                    start,
+                                    Math.max(
+                                      SLOT_MINUTES,
+                                      service.defaultDurationMinutes,
+                                    ),
+                                    dayData,
+                                    configuration,
+                                  ),
+                              )
+                            : false;
+
+                        const available =
+                          hasAvailability &&
+                          hasAnyService;
+
+                        return (
+                          <button
+                            key={start}
+                            type="button"
+                            className={`schedule-slot ${
+                              available
+                                ? "available"
+                                : "unavailable"
+                            }`}
+                            disabled={
+                              !available
+                            }
+                            onClick={() =>
+                              openCreateModal(
+                                area.id,
+                                start,
+                              )
+                            }
+                            aria-label={`${area.name}, ${formatTime(start)}`}
+                          />
+                        );
+                      },
+                    )}
+
+                    {areaAppointments.map(
+                      (appointment) => {
+                        const isBeingDragged =
+                          previewAppointmentId ===
+                          appointment.id;
+
+                        const isPreviewTarget =
+                          isBeingDragged &&
+                          previewAreaId ===
+                            area.id &&
+                          previewValid;
+
+                        if (
+                          isBeingDragged &&
+                          previewAreaId !==
+                            area.id
+                        ) {
+                          return null;
+                        }
+
+                        if (
+                          isBeingDragged &&
+                          !previewValid
+                        ) {
+                          return null;
+                        }
+
+                        const start =
+                          isPreviewTarget &&
+                          previewStartMinutes !==
+                            undefined
+                            ? previewStartMinutes
+                            : appointment.startMinutes;
+
+                        const duration =
+                          isBeingDragged &&
+                          previewDuration !==
+                            undefined
+                            ? previewDuration
+                            : appointment.durationMinutes;
+
+                        const top =
+                          ((start -
+                            DAY_START) /
+                            SLOT_MINUTES) *
+                          SLOT_HEIGHT;
+
+                        const height =
+                          Math.max(
+                            SLOT_HEIGHT,
+                            (duration /
+                              SLOT_MINUTES) *
+                              SLOT_HEIGHT,
+                          );
+
+                        const service =
+                          serviceById.get(
+                            appointment.serviceId,
+                          );
+
+                        return (
+                          <button
+                            key={
+                              appointment.id
+                            }
+                            type="button"
+                            className={`appointment-card ${
+                              isBeingDragged
+                                ? "dragging"
+                                : ""
+                            }`}
+                            style={{
+                              top,
+                              height,
+                            }}
+                            onPointerDown={(
+                              event,
+                            ) =>
+                              beginAppointmentInteraction(
+                                event,
+                                appointment,
+                                "drag",
+                              )
+                            }
+                            onClick={() =>
+                              handleAppointmentClick(
+                                appointment,
+                              )
+                            }
+                          >
+                            <strong>
+                              {getPatientName(
+                                appointment.patientId,
+                              )}
+                            </strong>
+
+                            <span className="appointment-service">
+                              {service?.name ??
+                                appointment.serviceId}
+                            </span>
+
+                            <span className="appointment-time">
+                              {formatTime(
+                                start,
+                              )}{" "}
+                              –
+                              {formatTime(
+                                start +
+                                  duration,
+                              )}
+                            </span>
+
+                            <span
+                              className="appointment-resize-handle"
+                              onPointerDown={(
+                                event,
+                              ) => {
+                                event.stopPropagation();
+
+                                beginAppointmentInteraction(
+                                  event,
+                                  appointment,
+                                  "resize",
+                                );
+                              }}
+                            />
+                          </button>
+                        );
+                      },
+                    )}
+
+                    {isBeingPreviewedInAnotherArea(
+                      previewAppointmentId,
+                      area.id,
+                      previewAreaId,
+                    ) &&
+                      previewValid &&
+                      interaction &&
+                      previewStartMinutes !==
+                        undefined && (
+                        <div
+                          className="appointment-card drag-preview"
+                          style={{
+                            top:
+                              ((previewStartMinutes -
+                                DAY_START) /
+                                SLOT_MINUTES) *
+                              SLOT_HEIGHT,
+                            height:
+                              Math.max(
+                                SLOT_HEIGHT,
+                                (interaction
+                                  .originalDurationMinutes /
+                                  SLOT_MINUTES) *
+                                  SLOT_HEIGHT,
+                              ),
+                          }}
+                        >
+                          <strong>
+                            {getPatientName(
+                              interaction
+                                .appointment
+                                .patientId,
+                            )}
+                          </strong>
+
+                          <span className="appointment-service">
+                            {serviceById.get(
+                              interaction
+                                .appointment
+                                .serviceId,
+                            )?.name ??
+                              interaction
+                                .appointment
+                                .serviceId}
+                          </span>
+
+                          <span className="appointment-time">
+                            {formatTime(
+                              previewStartMinutes,
+                            )}{" "}
+                            –
+                            {formatTime(
+                              previewStartMinutes +
+                                interaction
+                                  .originalDurationMinutes,
+                            )}
+                          </span>
+                        </div>
+                      )}
                   </div>
                 );
               },
             )}
           </div>
-
-          {clinicProviders.map((provider, index) => {
-            const providerAvailability = getAvailabilities(provider.id, selectedDate, scheduleData.providerAvailability);
-
-            const providerAppointments =
-              scheduleAppointments.filter(
-                (appointment) =>
-                  appointment.date === selectedDate &&
-                  appointment.providerId === provider.id,
-              );
-
-            return (
-              <div
-                className="provider-column"
-                key={provider.id}
-                data-provider-id={provider.id}
-                style={{ gridColumn: index + 2 }}
-              >
-                {Array.from(
-                  {
-                    length:
-                      (DAY_END - DAY_START) / SLOT_MINUTES,
-                  },
-                  (_, index) => {
-                    const minutes =
-                      DAY_START + index * SLOT_MINUTES;
-
-                    const available = providerAvailability.some(
-                      (availability) =>
-                        minutes >= availability.startMinutes &&
-                        minutes < availability.endMinutes,
-                    );
-
-                    return (
-                      <button
-                        type="button"
-                        className={
-                          available
-                            ? "schedule-slot available"
-                            : "schedule-slot unavailable"
-                        }
-                        key={minutes}
-                        onClick={() =>
-                          handleSlotClick(provider, minutes)
-                        }
-                        aria-label={`${provider.name} at ${formatTime(minutes)}`}
-                      />
-                    );
-                  },
-                )}
-
-                {providerAppointments.map((appointment) => {
-                  const service = getService(
-                    appointment.serviceId,
-                  );
-
-                  const top =
-                    ((appointment.startMinutes - DAY_START) /
-                      SLOT_MINUTES) *
-                    SLOT_HEIGHT;
-
-                  const height =
-                    (appointment.durationMinutes /
-                      SLOT_MINUTES) *
-                    SLOT_HEIGHT;
-
-                  return (
-                    <button
-                      type="button"
-                      key={appointment.id}
-                      className={`appointment-card ${
-                        draggingAppointmentId === appointment.id
-                          ? "dragging"
-                        : ""
-                      } ${
-                        resizingAppointmentId === appointment.id
-                          ? "resizing"
-                          : ""
-                      }`}
-                      style={{
-                        top: `${top}px`,
-                        height: `${height - 4}px`,
-                      }}
-                      onPointerDown={(event) =>
-                        handleAppointmentDragStart(
-                          event,
-                          appointment,
-                        )
-                      }
-                      onClick={(event) =>
-                        handleAppointmentClick(
-                          event,
-                          appointment,
-                        )
-                      }
-                    >
-                      <strong>
-                        {getPatientName(appointment.patientId)}
-                      </strong>
-
-                      <span className="appointment-service">
-                        {service?.name}
-                      </span>
-
-                      <span className="appointment-time">
-                        {formatTime(appointment.startMinutes)} –
-                        {" "}
-                        {formatTime(
-                          appointment.startMinutes +
-                            appointment.durationMinutes,
-                        )}
-                      </span>
-                      <span
-                        className="appointment-resize-handle"
-                        onPointerDown={(event) =>
-                          handleAppointmentResizeStart(
-                            event,
-                            appointment,
-                          )
-                        }
-                        aria-label="Resize appointment"
-                      />
-                    </button>
-                  );
-                })}
-              </div>
-            );
-          })}
         </div>
-      </section>
+      )}
 
-      {newAppointmentDraft && (
-        <div
-          className="schedule-modal-backdrop"
-          onClick={() => {
-            setNewAppointmentDraft(null);
-            setCreationError(null);
-          }}
-        >
+      {dragError && (
+        <div className="schedule-drag-error">
+          {dragError}
+        </div>
+      )}
+
+      {pendingMove && (
+        <div className="schedule-modal-backdrop">
           <div
             className="schedule-modal"
-            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
           >
             <div className="modal-header">
               <div>
-                <span className="schedule-eyebrow">
-                  New appointment
-                </span>
-                <h2>Create appointment</h2>
+                <h2>Move appointment?</h2>
               </div>
 
               <button
                 type="button"
                 className="modal-close"
-                onClick={() => {
-                  setNewAppointmentDraft(null);
-                  setCreationError(null);
-                }}
+                onClick={
+                  cancelPendingMove
+                }
+                aria-label="Close"
               >
                 ×
               </button>
@@ -998,68 +2741,233 @@ export default function SchedulePage() {
 
             <div className="appointment-summary">
               <strong>
-                {providers.find(
-                  (provider) => provider.id === newAppointmentDraft.providerId,
-                )?.name ?? "Unknown provider"}
+                {getPatientName(
+                  pendingMove
+                    .appointment
+                    .patientId,
+                )}
               </strong>
-              <span>{formatDate(newAppointmentDraft.date)}</span>
-              <span>{formatTime(newAppointmentDraft.startMinutes)}</span>
+
+              <span>
+                {
+                  serviceById.get(
+                    pendingMove
+                      .appointment
+                      .serviceId,
+                  )?.name
+                }
+              </span>
+
+              <span>
+                {
+                  activeServiceAreas.find(
+                    (area) =>
+                      area.id ===
+                      pendingMove.serviceAreaId,
+                  )?.name
+                }{" "}
+                at{" "}
+                {formatTime(
+                  pendingMove.startMinutes,
+                )}
+              </span>
+
+              <span>
+                Provider:{" "}
+                {getAssignedProvider(
+                  pendingMove.serviceAreaId,
+                  dayData,
+                )?.name ??
+                  "Unassigned"}
+              </span>
+            </div>
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={
+                  cancelPendingMove
+                }
+              >
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                className="primary-button"
+                onClick={
+                  confirmPendingMove
+                }
+              >
+                Move Appointment
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {modalDraft && (
+        <div className="schedule-modal-backdrop">
+          <div
+            className="schedule-modal"
+            role="dialog"
+            aria-modal="true"
+          >
+            <div className="modal-header">
+              <div>
+                <h2>
+                  {modalDraft.id
+                    ? "Edit Appointment"
+                    : "New Appointment"}
+                </h2>
+              </div>
+
+              <button
+                type="button"
+                className="modal-close"
+                onClick={closeModal}
+                disabled={saving}
+                aria-label="Close"
+              >
+                ×
+              </button>
             </div>
 
             <label>
               Patient
-              <select
-                value={newAppointmentDraft.patientId}
-                onChange={(event) =>
-                  setNewAppointmentDraft((current) =>
-                    current
-                      ? { ...current, patientId: event.target.value }
-                      : current,
-                  )
+              <input
+                value={
+                  modalDraft.patientId
+                    ? getPatientName(
+                        modalDraft.patientId,
+                      )
+                    : patientSearch
                 }
-              >
-                <option value="" disabled>
-                  Select patient...
-                </option>
-
-                {getScheduleStore().patients.map((patient) => (
-                  <option value={patient.id} key={patient.id}>
-                    {patient.firstName} {patient.lastName}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label>
-              Service
-              <select
-                value={newAppointmentDraft.serviceId}
-                onChange={(event) =>
-                  setNewAppointmentDraft((current) =>
-                    current
-                      ? { ...current, serviceId: event.target.value }
-                      : current,
-                  )
-                }
-              >
-                {providers
-                  .find(
-                    (provider) => provider.id === newAppointmentDraft.providerId,
-                  )
-                  ?.serviceIds.map((serviceId) => {
-                    const service = getService(serviceId);
-
-                    if (!service) {
-                      return null;
-                    }
-
-                    return (
-                      <option value={service.id} key={service.id}>
-                        {service.name} ({service.defaultDurationMinutes} min)
-                      </option>
+                onChange={(event) => {
+                  if (
+                    modalDraft.patientId
+                  ) {
+                    setModalDraft(
+                      (current) =>
+                        current
+                          ? {
+                              ...current,
+                              patientId:
+                                "",
+                            }
+                          : current,
                     );
-                  })}
-              </select>
+                  }
+
+                  setPatientSearch(
+                    event.target.value,
+                  );
+                }}
+                placeholder="Search by name, phone, email, or patient number"
+                autoComplete="off"
+              />
+
+              {modalDraft.patientId && (
+                <button
+                  type="button"
+                  className="patient-clear"
+                  onClick={() => {
+                    setModalDraft(
+                      (current) =>
+                        current
+                          ? {
+                              ...current,
+                              patientId:
+                                "",
+                            }
+                          : current,
+                    );
+                    setPatientSearch(
+                      "",
+                    );
+                  }}
+                >
+                  Change patient
+                </button>
+              )}
+
+              {!modalDraft.patientId &&
+                patientSearch.trim()
+                  .length >= 2 && (
+                  <div className="patient-search-results">
+                    {patientSearchLoading ? (
+                      <div className="patient-search-message">
+                        Searching…
+                      </div>
+                    ) : patientSearchResults.length >
+                      0 ? (
+                      patientSearchResults.map(
+                        (
+                          patient,
+                        ) => (
+                          <button
+                            key={
+                              patient.id
+                            }
+                            type="button"
+                            className="patient-search-result"
+                            onClick={() => {
+                              setModalDraft(
+                                (
+                                  current,
+                                ) =>
+                                  current
+                                    ? {
+                                        ...current,
+                                        patientId:
+                                          patient.id,
+                                        bookingStatus:
+                                          bookingStatuses.some(
+                                            (
+                                              status,
+                                            ) =>
+                                              status.id ===
+                                              patient.bookingStatus,
+                                          )
+                                            ? patient.bookingStatus
+                                            : current.bookingStatus,
+                                      }
+                                    : current,
+                              );
+
+                              setPatientSearch(
+                                "",
+                              );
+                              setPatientSearchResults(
+                                [],
+                              );
+                            }}
+                          >
+                            <strong>
+                              {
+                                patient.firstName
+                              }{" "}
+                              {
+                                patient.lastName
+                              }
+                            </strong>
+
+                            <span>
+                              {
+                                patient.patientNumber
+                              }
+                            </span>
+                          </button>
+                        ),
+                      )
+                    ) : (
+                      <div className="patient-search-message">
+                        No patients found.
+                      </div>
+                    )}
+                  </div>
+                )}
             </label>
 
             <div className="modal-grid">
@@ -1067,12 +2975,12 @@ export default function SchedulePage() {
                 Date
                 <input
                   type="date"
-                  value={newAppointmentDraft.date}
+                  value={
+                    modalDraft.date
+                  }
                   onChange={(event) =>
-                    setNewAppointmentDraft((current) =>
-                      current
-                        ? { ...current, date: event.target.value }
-                        : current,
+                    handleDraftDateChange(
+                      event.target.value,
                     )
                   }
                 />
@@ -1083,47 +2991,208 @@ export default function SchedulePage() {
                 <input
                   type="time"
                   step={SLOT_MINUTES * 60}
-                  value={`${String(
-                    Math.floor(newAppointmentDraft.startMinutes / 60),
-                  ).padStart(2, "0")}:${String(
-                    newAppointmentDraft.startMinutes % 60,
-                  ).padStart(2, "0")}`}
-                  onChange={(event) => {
-                    const [hours, minutesValue] = event.target.value
-                      .split(":")
-                      .map(Number);
-
-                    if (Number.isNaN(hours) || Number.isNaN(minutesValue)) {
-                      return;
-                    }
-
-                    setNewAppointmentDraft((current) =>
-                      current
-                        ? {
-                            ...current,
-                            startMinutes: hours * 60 + minutesValue,
-                          }
-                        : current,
-                    );
-                  }}
+                  value={minutesToTimeInput(
+                    modalDraft.startMinutes,
+                  )}
+                  onChange={(event) =>
+                    setModalDraft(
+                      (current) =>
+                        current
+                          ? {
+                              ...current,
+                              startMinutes:
+                                timeInputToMinutes(
+                                  event
+                                    .target
+                                    .value,
+                                ),
+                            }
+                          : current,
+                    )
+                  }
                 />
               </label>
             </div>
 
-            {creationError && (
-              <p className="schedule-form-error" role="alert">
-                {creationError}
+            <label>
+              Service area
+              <select
+                value={
+                  modalDraft.serviceAreaId
+                }
+                onChange={(event) =>
+                  handleDraftAreaChange(
+                    event.target.value,
+                  )
+                }
+                disabled={
+                  modalDayLoading
+                }
+              >
+                {activeServiceAreas.map(
+                  (area) => {
+                    const provider =
+                      getAssignedProvider(
+                        area.id,
+                        modalDayData,
+                      );
+
+                    return (
+                      <option
+                        key={area.id}
+                        value={area.id}
+                      >
+                        {area.name}
+                        {provider
+                          ? ` — ${provider.name}`
+                          : " — Unassigned"}
+                      </option>
+                    );
+                  },
+                )}
+              </select>
+            </label>
+
+            <label>
+              Service
+              <select
+                value={
+                  modalDraft.serviceId
+                }
+                onChange={(event) =>
+                  setModalDraft(
+                    (current) =>
+                      current
+                        ? {
+                            ...current,
+                            serviceId:
+                              event
+                                .target
+                                .value,
+                          }
+                        : current,
+                  )
+                }
+                disabled={
+                  modalDayLoading ||
+                  !modalDayData
+                }
+              >
+                {modalDayData &&
+                  getServicesForArea(
+                    modalDraft.serviceAreaId,
+                    modalDayData,
+                    configuration,
+                  ).map(
+                    (service) => (
+                      <option
+                        key={service.id}
+                        value={service.id}
+                      >
+                        {service.name}
+                      </option>
+                    ),
+                  )}
+              </select>
+            </label>
+
+            <div className="modal-grid">
+              <label>
+                Duration
+                <input
+                  type="number"
+                  min={1}
+                  value={
+                    modalDraft.durationMinutes
+                  }
+                  onChange={(event) =>
+                    setModalDraft(
+                      (current) =>
+                        current
+                          ? {
+                              ...current,
+                              durationMinutes:
+                                Math.max(
+                                  1,
+                                  Number(
+                                    event
+                                      .target
+                                      .value,
+                                  ),
+                                ),
+                            }
+                          : current,
+                    )
+                  }
+                />
+              </label>
+
+              <label>
+                Booking status
+                <select
+                  value={
+                    modalDraft.bookingStatus
+                  }
+                  onChange={(event) =>
+                    setModalDraft(
+                      (current) =>
+                        current
+                          ? {
+                              ...current,
+                              bookingStatus:
+                                event
+                                  .target
+                                  .value,
+                            }
+                          : current,
+                    )
+                  }
+                >
+                  {bookingStatuses.map(
+                    (status) => (
+                      <option
+                        key={status.id}
+                        value={status.id}
+                      >
+                        {status.name}
+                      </option>
+                    ),
+                  )}
+                </select>
+              </label>
+            </div>
+
+            {modalDayLoading && (
+              <div className="patient-search-message">
+                Loading schedule information…
+              </div>
+            )}
+
+            {modalError && (
+              <p className="schedule-form-error">
+                {modalError}
               </p>
             )}
 
             <div className="modal-actions">
+              {modalDraft.id && (
+                <button
+                  type="button"
+                  className="secondary-button modal-delete-button"
+                  onClick={
+                    removeAppointment
+                  }
+                  disabled={saving}
+                >
+                  Delete
+                </button>
+              )}
+
               <button
                 type="button"
                 className="secondary-button"
-                onClick={() => {
-                  setNewAppointmentDraft(null);
-                  setCreationError(null);
-                }}
+                onClick={closeModal}
+                disabled={saving}
               >
                 Cancel
               </button>
@@ -1131,262 +3200,36 @@ export default function SchedulePage() {
               <button
                 type="button"
                 className="primary-button"
-                onClick={() => {
-                  const provider = providers.find(
-                    (item) => item.id === newAppointmentDraft.providerId,
-                  );
-                  const service = getService(newAppointmentDraft.serviceId);
-                  const availability = provider
-                    ? getAvailabilityBlockForRange(
-                        provider.id,
-                        newAppointmentDraft.date,
-                        newAppointmentDraft.startMinutes,
-                        getService(newAppointmentDraft.serviceId)?.defaultDurationMinutes ?? 0,
-                        scheduleData.providerAvailability,
-                      )
-                    : undefined;
-
-                  if (!newAppointmentDraft.patientId) {
-                    setCreationError("Please select a patient.");
-                    return;
-                  }
-
-                  if (!provider || !service) {
-                    setCreationError("Please select a valid provider and service.");
-                    return;
-                  }
-
-                  if (!provider.serviceIds.includes(service.id)) {
-                    setCreationError(
-                      `${provider.name} does not provide ${service.name}.`,
-                    );
-                    return;
-                  }
-
-                  const endMinutes =
-                    newAppointmentDraft.startMinutes +
-                    service.defaultDurationMinutes;
-
-                  if (
-                    !availability ||
-                    newAppointmentDraft.startMinutes < availability.startMinutes ||
-                    endMinutes > availability.endMinutes
-                  ) {
-                    setCreationError(
-                      `This appointment does not fit within ${provider.name}'s availability.`,
-                    );
-                    return;
-                  }
-
-                  const appointmentForConflictCheck: Appointment = {
-                    id: "new-appointment",
-                    patientId: newAppointmentDraft.patientId,
-                    providerId: provider.id,
-                    serviceId: service.id,
-                    date: newAppointmentDraft.date,
-                    startMinutes: newAppointmentDraft.startMinutes,
-                    durationMinutes: service.defaultDurationMinutes,
-                  };
-
-                  if (
-                    hasAppointmentConflict(
-                      appointmentForConflictCheck,
-                      provider.id,
-                      newAppointmentDraft.startMinutes,
-                      newAppointmentDraft.date,
-                    )
-                  ) {
-                    setCreationError(
-                      `${provider.name} already has an appointment during this time.`,
-                    );
-                    return;
-                  }
-
-                  const newAppointment: Appointment = {
-                    ...appointmentForConflictCheck,
-                    id: `appointment-${Date.now()}`,
-                  };
-
-                  setScheduleAppointments((current) => [
-                    ...current,
-                    newAppointment,
-                  ]);
-
-                  setSelectedDate(newAppointment.date);
-                  setNewAppointmentDraft(null);
-                  setCreationError(null);
-                  if (schedulingPatientId) {
-                    setSearchParams({}, { replace: true });
-                  }
-                }}
-              >
-                Create appointment
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {selectedAppointment && (
-        <div
-          className="schedule-modal-backdrop"
-          onClick={() => setSelectedAppointment(null)}
-        >
-          <div
-            className="schedule-modal"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="modal-header">
-              <div>
-                <span className="schedule-eyebrow">
-                  Appointment
-                </span>
-
-                <h2>
-                  {getPatientName(
-                    selectedAppointment.patientId,
-                  )}
-                </h2>
-              </div>
-
-              <button
-                type="button"
-                className="modal-close"
-                onClick={() => setSelectedAppointment(null)}
-              >
-                ×
-              </button>
-            </div>
-
-            <div className="appointment-summary">
-              <strong>
-                {
-                  getService(selectedAppointment.serviceId)
-                    ?.name
+                onClick={saveDraft}
+                disabled={
+                  saving ||
+                  modalDayLoading
                 }
-              </strong>
-
-              <span>
-                {formatTime(selectedAppointment.startMinutes)} –
-                {" "}
-                {formatTime(
-                  selectedAppointment.startMinutes +
-                    selectedAppointment.durationMinutes,
-                )}
-              </span>
-            </div>
-
-            <div className="modal-actions">
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() => setSelectedAppointment(null)}
               >
-                Close
+                {saving
+                  ? "Saving…"
+                  : "Done"}
               </button>
             </div>
           </div>
         </div>
       )}
-        {pendingProviderMove &&
-         !draggingAppointmentId && (
-        <div
-          className="schedule-modal-backdrop"
-          onClick={cancelProviderMove}
-        >
-        <div
-          className="schedule-modal"
-          onClick={(event) =>
-            event.stopPropagation()
-          }
-        >
-        <div className="modal-header">
-          <div>
-            <span className="schedule-eyebrow">
-              Move appointment
-            </span>
-
-            <h2>Are you sure?</h2>
-          </div>
-
-          <button
-            type="button"
-            className="modal-close"
-            onClick={cancelProviderMove}
-          >
-            ×
-          </button>
-        </div>
-
-        <div className="appointment-summary">
-          <strong>
-            {
-              getService(
-                scheduleAppointments.find(
-                  (appointment) =>
-                    appointment.id ===
-                    pendingProviderMove.appointmentId,
-                )?.serviceId ?? "",
-              )?.name
-            }
-          </strong>
-
-          <span>
-            {
-              getPatientName(
-                scheduleAppointments.find(
-                  (appointment) =>
-                    appointment.id ===
-                    pendingProviderMove.appointmentId,
-                )?.patientId ?? "",
-              )
-            }
-          </span>
-
-          <span>
-            {
-              providers.find(
-                (provider) =>
-                  provider.id ===
-                  pendingProviderMove.fromProviderId,
-              )?.name
-            }
-            {" → "}
-            {
-              providers.find(
-                (provider) =>
-                  provider.id ===
-                  pendingProviderMove.toProviderId,
-              )?.name
-            }
-          </span>
-        </div>
-
-        <p>
-          This will move the appointment to the selected
-          provider while keeping the same time.
-        </p>
-
-        <div className="modal-actions">
-          <button
-            type="button"
-            className="secondary-button"
-            onClick={cancelProviderMove}
-          >
-            Cancel
-          </button>
-
-          <button
-            type="button"
-            className="primary-button"
-            onClick={confirmProviderMove}
-          >
-            Move appointment
-          </button>
-        </div>
-      </div>
     </div>
-  )}
-    </div>
+  );
+}
+
+function isBeingPreviewedInAnotherArea(
+  previewAppointmentId:
+    | string
+    | null,
+  areaId: string,
+  previewAreaId:
+    | string
+    | undefined,
+): boolean {
+  return Boolean(
+    previewAppointmentId &&
+      previewAreaId &&
+      previewAreaId === areaId,
   );
 }
