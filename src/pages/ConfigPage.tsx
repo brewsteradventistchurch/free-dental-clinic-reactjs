@@ -5,62 +5,59 @@ import {
   getConfiguration,
   updateProviders,
   updateServices,
+  updateServiceAreas,
 } from "../api/configurationApi";
 import {
   deleteProviderAvailability,
+  deleteServiceAreaAssignment,
   getProviderAvailability,
+  getServiceAreaAssignments,
   saveProviderAvailability,
+  saveServiceAreaAssignment,
 } from "../api/scheduling";
 import type {
   ClinicConfiguration,
   Provider,
   ProviderAvailability,
   Service,
+  ServiceArea,
+  ServiceAreaAssignment,
 } from "../schedule/types";
 import "./ConfigPage.css";
 
 function formatDate(date: string) {
-  const [year, month, day] = date
-    .split("-")
-    .map(Number);
+  const [year, month, day] = date.split("-").map(Number);
 
   return new Intl.DateTimeFormat("en-US", {
     weekday: "short",
     month: "short",
     day: "numeric",
     year: "numeric",
-  }).format(
-    new Date(year, month - 1, day),
-  );
+  }).format(new Date(year, month - 1, day));
 }
 
 function formatShortDate(date: string) {
-  const [year, month, day] = date
-    .split("-")
-    .map(Number);
+  const [year, month, day] = date.split("-").map(Number);
 
   return new Intl.DateTimeFormat("en-US", {
     weekday: "short",
     month: "short",
     day: "numeric",
-  }).format(
-    new Date(year, month - 1, day),
-  );
+  }).format(new Date(year, month - 1, day));
 }
 
 function toTime(minutes: number) {
   const hours = Math.floor(minutes / 60);
   const mins = minutes % 60;
 
-  return `${String(hours).padStart(2, "0")}:${String(
-    mins,
-  ).padStart(2, "0")}`;
+  return `${String(hours).padStart(2, "0")}:${String(mins).padStart(
+    2,
+    "0",
+  )}`;
 }
 
 function fromTime(value: string) {
-  const [hours, minutes] = value
-    .split(":")
-    .map(Number);
+  const [hours, minutes] = value.split(":").map(Number);
 
   return hours * 60 + minutes;
 }
@@ -70,9 +67,7 @@ function todayString() {
 
   return `${date.getFullYear()}-${String(
     date.getMonth() + 1,
-  ).padStart(2, "0")}-${String(
-    date.getDate(),
-  ).padStart(2, "0")}`;
+  ).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
 function sortServices(services: Service[]) {
@@ -83,6 +78,12 @@ function sortServices(services: Service[]) {
 
 function sortProviders(providers: Provider[]) {
   return [...providers].sort(
+    (a, b) => a.displayOrder - b.displayOrder,
+  );
+}
+
+function sortServiceAreas(serviceAreas: ServiceArea[]) {
+  return [...serviceAreas].sort(
     (a, b) => a.displayOrder - b.displayOrder,
   );
 }
@@ -99,68 +100,50 @@ type AvailabilityRow = {
 export default function ConfigPage() {
   const { user } = useAuth();
 
-  const [
-    configuration,
-    setConfiguration,
-  ] = useState<ClinicConfiguration | null>(
-    null,
-  );
+  const [configuration, setConfiguration] =
+    useState<ClinicConfiguration | null>(null);
 
-  const [
-    providerAvailability,
-    setProviderAvailability,
-  ] = useState<ProviderAvailability[]>(
-    [],
-  );
+  const [providerAvailability, setProviderAvailability] =
+    useState<ProviderAvailability[]>([]);
 
-  const [loading, setLoading] =
-    useState(true);
+  const [serviceAreaAssignments, setServiceAreaAssignments] =
+    useState<ServiceAreaAssignment[]>([]);
 
-  const [saving, setSaving] =
+  const [assignmentDate, setAssignmentDate] =
+    useState(todayString());
+
+  const [assignmentsLoading, setAssignmentsLoading] =
     useState(false);
 
-  const [message, setMessage] =
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  const [section, setSection] = useState<
+    "services" | "providers" | "serviceAreas"
+  >("services");
+
+  const [editingService, setEditingService] =
+    useState<Service | null>(null);
+
+  const [serviceDurationDraft, setServiceDurationDraft] =
     useState("");
 
-  const [error, setError] =
-    useState("");
+  const [editingProvider, setEditingProvider] =
+    useState<Provider | null>(null);
 
-  const [section, setSection] =
-    useState<"services" | "providers">(
-      "services",
-    );
+  const [expandedProviders, setExpandedProviders] =
+    useState<Set<string>>(new Set());
 
-  const [
-    editingService,
-    setEditingService,
-  ] = useState<Service | null>(null);
+  const [editingServiceArea, setEditingServiceArea] =
+    useState<ServiceArea | null>(null);
 
-  const [
-    serviceDurationDraft,
-    setServiceDurationDraft,
-  ] = useState("");
+  const [addingAvailabilityFor, setAddingAvailabilityFor] =
+    useState<string | null>(null);
 
-  const [
-    editingProvider,
-    setEditingProvider,
-  ] = useState<Provider | null>(null);
-
-  const [
-    expandedProviders,
-    setExpandedProviders,
-  ] = useState<Set<string>>(
-    new Set(),
-  );
-
-  const [
-    addingAvailabilityFor,
-    setAddingAvailabilityFor,
-  ] = useState<string | null>(null);
-
-  const [
-    availabilityDraft,
-    setAvailabilityDraft,
-  ] = useState({
+  const [availabilityDraft, setAvailabilityDraft] = useState({
     date: todayString(),
     startMinutes: 8 * 60,
     endMinutes: 12 * 60,
@@ -174,7 +157,10 @@ export default function ConfigPage() {
       setError("");
 
       try {
-        const result = await getConfiguration();
+        const [result, availability] = await Promise.all([
+          getConfiguration(),
+          getProviderAvailability(),
+        ]);
 
         if (cancelled) {
           return;
@@ -184,20 +170,10 @@ export default function ConfigPage() {
           ...result,
           services: sortServices(result.services),
           providers: sortProviders(result.providers),
+          serviceAreas: sortServiceAreas(result.serviceAreas),
         });
 
-        const availability =
-          await getProviderAvailability(
-            todayString(),
-          );
-
-        if (cancelled) {
-          return;
-        }
-
-        setProviderAvailability(
-          availability,
-        );
+        setProviderAvailability(availability);
       } catch (loadError) {
         if (!cancelled) {
           setError(
@@ -220,33 +196,58 @@ export default function ConfigPage() {
     };
   }, []);
 
-  if (
-    user?.role.toLowerCase() !==
-    "admin"
-  ) {
-    return (
-      <Navigate
-        to="/dashboard"
-        replace
-      />
-    );
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadAssignments() {
+      setAssignmentsLoading(true);
+      setError("");
+
+      try {
+        const assignments =
+          await getServiceAreaAssignments(
+            assignmentDate,
+          );
+
+        if (!cancelled) {
+          setServiceAreaAssignments(assignments);
+        }
+      } catch (loadError) {
+        if (!cancelled) {
+          setError(
+            loadError instanceof Error
+              ? loadError.message
+              : "Unable to load provider assignments.",
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setAssignmentsLoading(false);
+        }
+      }
+    }
+
+    void loadAssignments();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [assignmentDate]);
+
+  if (user?.role.toLowerCase() !== "admin") {
+    return <Navigate to="/dashboard" replace />;
   }
 
   if (loading) {
     return (
       <div className="config-page">
         <div className="page-heading">
-          <span className="eyebrow">
-            Configuration
-          </span>
-
+          <span className="eyebrow">Configuration</span>
           <h1>Clinic setup</h1>
         </div>
 
         <div className="admin-panel">
-          <p>
-            Loading clinic configuration…
-          </p>
+          <p>Loading clinic configuration…</p>
         </div>
       </div>
     );
@@ -256,10 +257,7 @@ export default function ConfigPage() {
     return (
       <div className="config-page">
         <div className="page-heading">
-          <span className="eyebrow">
-            Configuration
-          </span>
-
+          <span className="eyebrow">Configuration</span>
           <h1>Clinic setup</h1>
         </div>
 
@@ -268,16 +266,14 @@ export default function ConfigPage() {
             className="admin-message error"
             role="alert"
           >
-            {error ||
-              "Unable to load clinic configuration."}
+            {error || "Unable to load clinic configuration."}
           </div>
         </div>
       </div>
     );
   }
 
-  const currentConfiguration =
-    configuration;
+  const currentConfiguration = configuration;
 
   async function saveServices(
     services: Service[],
@@ -286,29 +282,20 @@ export default function ConfigPage() {
     setError("");
 
     try {
-      const saved =
-        await updateServices(
-          sortServices(services),
-        );
+      const saved = await updateServices(
+        sortServices(services),
+      );
 
       setConfiguration({
         ...saved,
-        services: sortServices(
-          saved.services,
-        ),
-        providers: sortProviders(
-          saved.providers,
-        ),
+        services: sortServices(saved.services),
+        providers: sortProviders(saved.providers),
+        serviceAreas: sortServiceAreas(saved.serviceAreas),
       });
 
-      setMessage(
-        "Services saved.",
-      );
+      setMessage("Services saved.");
 
-      window.setTimeout(
-        () => setMessage(""),
-        2200,
-      );
+      window.setTimeout(() => setMessage(""), 2200);
 
       return true;
     } catch (saveError) {
@@ -331,29 +318,20 @@ export default function ConfigPage() {
     setError("");
 
     try {
-      const saved =
-        await updateProviders(
-          sortProviders(providers),
-        );
+      const saved = await updateProviders(
+        sortProviders(providers),
+      );
 
       setConfiguration({
         ...saved,
-        services: sortServices(
-          saved.services,
-        ),
-        providers: sortProviders(
-          saved.providers,
-        ),
+        services: sortServices(saved.services),
+        providers: sortProviders(saved.providers),
+        serviceAreas: sortServiceAreas(saved.serviceAreas),
       });
 
-      setMessage(
-        "Providers saved.",
-      );
+      setMessage("Providers saved.");
 
-      window.setTimeout(
-        () => setMessage(""),
-        2200,
-      );
+      window.setTimeout(() => setMessage(""), 2200);
 
       return true;
     } catch (saveError) {
@@ -369,66 +347,172 @@ export default function ConfigPage() {
     }
   }
 
+  async function saveServiceAreas(
+    serviceAreas: ServiceArea[],
+  ): Promise<boolean> {
+    setSaving(true);
+    setError("");
+
+    try {
+      const saved = await updateServiceAreas(
+        sortServiceAreas(serviceAreas),
+      );
+
+      setConfiguration({
+        ...saved,
+        services: sortServices(saved.services),
+        providers: sortProviders(saved.providers),
+        serviceAreas: sortServiceAreas(saved.serviceAreas),
+      });
+
+      setMessage("Service areas saved.");
+
+      window.setTimeout(() => setMessage(""), 2200);
+
+      return true;
+    } catch (saveError) {
+      setError(
+        saveError instanceof Error
+          ? saveError.message
+          : "Unable to save service areas.",
+      );
+
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  }
+
   function availabilityFor(
     providerId: string,
   ): ProviderAvailability[] {
     return providerAvailability
       .filter(
-        (item) =>
-          item.providerId ===
-          providerId,
+        (item) => item.providerId === providerId,
       )
-      .sort(
-        (a, b) =>
-          a.date.localeCompare(b.date),
+      .sort((a, b) =>
+        a.date.localeCompare(b.date),
       );
   }
 
   function availabilityRowsFor(
     providerId: string,
   ): AvailabilityRow[] {
-    return availabilityFor(
-      providerId,
-    )
+    return availabilityFor(providerId)
       .flatMap((item) =>
         item.blocks.map(
-          (
-            block,
-            blockIndex,
-          ) => ({
+          (block, blockIndex) => ({
             availabilityId: item.id,
-            providerId:
-              item.providerId,
+            providerId: item.providerId,
             date: item.date,
             blockIndex,
-            startMinutes:
-              block.startMinutes,
-            endMinutes:
-              block.endMinutes,
+            startMinutes: block.startMinutes,
+            endMinutes: block.endMinutes,
           }),
         ),
       )
       .sort(
         (a, b) =>
-          a.date.localeCompare(
-            b.date,
-          ) ||
-          a.startMinutes -
-            b.startMinutes,
+          a.date.localeCompare(b.date) ||
+          a.startMinutes - b.startMinutes,
       );
   }
 
-  function openServiceEditor(
-    service: Service,
-  ) {
-    setEditingService({
-      ...service,
-    });
+    function assignmentForServiceArea(
+    serviceAreaId: string,
+  ): ServiceAreaAssignment | undefined {
+    return serviceAreaAssignments.find(
+      (assignment) =>
+        assignment.serviceAreaId ===
+        serviceAreaId,
+    );
+  }
 
+  function providerHasAvailability(
+    providerId: string,
+    date: string,
+  ): boolean {
+    return providerAvailability.some(
+      (availability) =>
+        availability.providerId === providerId &&
+        availability.date === date &&
+        availability.blocks.length > 0,
+    );
+  }
+
+  async function changeServiceAreaAssignment(
+    serviceAreaId: string,
+    providerId: string,
+  ) {
+    setSaving(true);
+    setError("");
+
+    try {
+      if (!providerId) {
+        await deleteServiceAreaAssignment(
+          serviceAreaId,
+          assignmentDate,
+        );
+
+        setServiceAreaAssignments(
+          (current) =>
+            current.filter(
+              (assignment) =>
+                !(
+                  assignment.serviceAreaId ===
+                    serviceAreaId &&
+                  assignment.date ===
+                    assignmentDate
+                ),
+            ),
+        );
+
+        setMessage("Provider assignment removed.");
+      } else {
+        const saved =
+          await saveServiceAreaAssignment(
+            serviceAreaId,
+            providerId,
+            assignmentDate,
+          );
+
+        setServiceAreaAssignments(
+          (current) => [
+            ...current.filter(
+              (assignment) =>
+                !(
+                  assignment.serviceAreaId ===
+                    serviceAreaId &&
+                  assignment.date ===
+                    assignmentDate
+                ),
+            ),
+            saved,
+          ],
+        );
+
+        setMessage("Provider assignment saved.");
+      }
+
+      window.setTimeout(
+        () => setMessage(""),
+        2200,
+      );
+    } catch (saveError) {
+      setError(
+        saveError instanceof Error
+          ? saveError.message
+          : "Unable to save provider assignment.",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function openServiceEditor(service: Service) {
+    setEditingService({ ...service });
     setServiceDurationDraft(
-      String(
-        service.defaultDurationMinutes,
-      ),
+      String(service.defaultDurationMinutes),
     );
   }
 
@@ -436,10 +520,7 @@ export default function ConfigPage() {
     const maxOrder =
       currentConfiguration.services.reduce(
         (max, service) =>
-          Math.max(
-            max,
-            service.displayOrder,
-          ),
+          Math.max(max, service.displayOrder),
         -1,
       );
 
@@ -450,8 +531,7 @@ export default function ConfigPage() {
       name: "",
       defaultDurationMinutes: 60,
       active: true,
-      displayOrder:
-        maxOrder + 1,
+      displayOrder: maxOrder + 1,
     });
 
     setServiceDurationDraft("60");
@@ -464,26 +544,18 @@ export default function ConfigPage() {
   }
 
   function normalizeDurationOnBlur() {
-    const parsed =
-      Number.parseInt(
-        serviceDurationDraft,
-        10,
-      );
+    const parsed = Number.parseInt(
+      serviceDurationDraft,
+      10,
+    );
 
-    if (
-      !Number.isFinite(parsed) ||
-      parsed < 20
-    ) {
+    if (!Number.isFinite(parsed) || parsed < 20) {
       setServiceDurationDraft("20");
       return;
     }
 
     setServiceDurationDraft(
-      String(
-        Math.round(
-          parsed / 20,
-        ) * 20,
-      ),
+      String(Math.round(parsed / 20) * 20),
     );
   }
 
@@ -492,31 +564,23 @@ export default function ConfigPage() {
       return;
     }
 
-    const name =
-      editingService.name.trim();
+    const name = editingService.name.trim();
 
     if (!name) {
-      setError(
-        "Please enter a service name.",
-      );
+      setError("Please enter a service name.");
       return;
     }
 
-    const parsedDuration =
-      Number.parseInt(
-        serviceDurationDraft,
-        10,
-      );
+    const parsedDuration = Number.parseInt(
+      serviceDurationDraft,
+      10,
+    );
 
     if (
-      !Number.isFinite(
-        parsedDuration,
-      ) ||
+      !Number.isFinite(parsedDuration) ||
       parsedDuration < 20
     ) {
-      setError(
-        "Duration must be at least 20 minutes.",
-      );
+      setError("Duration must be at least 20 minutes.");
       return;
     }
 
@@ -524,23 +588,19 @@ export default function ConfigPage() {
       ...editingService,
       name,
       defaultDurationMinutes:
-        Math.round(
-          parsedDuration / 20,
-        ) * 20,
+        Math.round(parsedDuration / 20) * 20,
     };
 
     const exists =
       currentConfiguration.services.some(
         (service) =>
-          service.id ===
-          savedService.id,
+          service.id === savedService.id,
       );
 
     const services = exists
       ? currentConfiguration.services.map(
           (service) =>
-            service.id ===
-            savedService.id
+            service.id === savedService.id
               ? savedService
               : service,
         )
@@ -549,25 +609,18 @@ export default function ConfigPage() {
           savedService,
         ];
 
-    const success =
-      await saveServices(
-        services,
-      );
+    const success = await saveServices(services);
 
     if (success) {
       closeServiceEditor();
     }
   }
 
-  async function deleteService(
-    id: string,
-  ) {
+  async function deleteService(id: string) {
     const used =
       currentConfiguration.providers.some(
         (provider) =>
-          provider.serviceIds.includes(
-            id,
-          ),
+          provider.serviceIds.includes(id),
       );
 
     if (used) {
@@ -577,14 +630,14 @@ export default function ConfigPage() {
       return;
     }
 
-    await saveServices(
+    const success = await saveServices(
       currentConfiguration.services.filter(
-        (service) =>
-          service.id !== id,
+        (service) => service.id !== id,
       ),
     );
 
     if (
+      success &&
       editingService?.id === id
     ) {
       closeServiceEditor();
@@ -596,9 +649,7 @@ export default function ConfigPage() {
   ) {
     setEditingProvider({
       ...provider,
-      serviceIds: [
-        ...provider.serviceIds,
-      ],
+      serviceIds: [...provider.serviceIds],
     });
   }
 
@@ -606,10 +657,7 @@ export default function ConfigPage() {
     const maxOrder =
       currentConfiguration.providers.reduce(
         (max, provider) =>
-          Math.max(
-            max,
-            provider.displayOrder,
-          ),
+          Math.max(max, provider.displayOrder),
         -1,
       );
 
@@ -620,8 +668,7 @@ export default function ConfigPage() {
       name: "",
       serviceIds: [],
       active: true,
-      displayOrder:
-        maxOrder + 1,
+      displayOrder: maxOrder + 1,
     });
 
     setSection("providers");
@@ -641,13 +688,10 @@ export default function ConfigPage() {
       return;
     }
 
-    const name =
-      editingProvider.name.trim();
+    const name = editingProvider.name.trim();
 
     if (!name) {
-      setError(
-        "Please enter the provider name.",
-      );
+      setError("Please enter the provider name.");
       return;
     }
 
@@ -659,15 +703,13 @@ export default function ConfigPage() {
     const exists =
       currentConfiguration.providers.some(
         (provider) =>
-          provider.id ===
-          savedProvider.id,
+          provider.id === savedProvider.id,
       );
 
     const providers = exists
       ? currentConfiguration.providers.map(
           (provider) =>
-            provider.id ===
-            savedProvider.id
+            provider.id === savedProvider.id
               ? savedProvider
               : provider,
         )
@@ -677,9 +719,7 @@ export default function ConfigPage() {
         ];
 
     const success =
-      await saveProviders(
-        providers,
-      );
+      await saveProviders(providers);
 
     if (success) {
       closeProviderEditor();
@@ -698,8 +738,7 @@ export default function ConfigPage() {
         serviceId,
       )
         ? editingProvider.serviceIds.filter(
-            (id) =>
-              id !== serviceId,
+            (id) => id !== serviceId,
           )
         : [
             ...editingProvider.serviceIds,
@@ -715,75 +754,249 @@ export default function ConfigPage() {
   function toggleProviderExpanded(
     providerId: string,
   ) {
-    setExpandedProviders(
-      (current) => {
-        const next = new Set(
-          current,
-        );
+    setExpandedProviders((current) => {
+      const next = new Set(current);
 
-        if (next.has(providerId)) {
-          next.delete(providerId);
-        } else {
-          next.add(providerId);
-        }
+      if (next.has(providerId)) {
+        next.delete(providerId);
+      } else {
+        next.add(providerId);
+      }
 
-        return next;
-      },
-    );
+      return next;
+    });
   }
 
   async function moveProvider(
     providerId: string,
     direction: -1 | 1,
   ) {
-    const providers =
-      sortProviders(
-        currentConfiguration.providers,
+    const providers = sortProviders(
+      currentConfiguration.providers,
+    );
+
+    const index = providers.findIndex(
+      (provider) =>
+        provider.id === providerId,
+    );
+
+    const targetIndex = index + direction;
+
+    if (
+      index < 0 ||
+      targetIndex < 0 ||
+      targetIndex >= providers.length
+    ) {
+      return;
+    }
+
+    const reordered = [...providers];
+
+    [reordered[index], reordered[targetIndex]] = [
+      reordered[targetIndex],
+      reordered[index],
+    ];
+
+    const normalized = reordered.map(
+      (provider, position) => ({
+        ...provider,
+        displayOrder: position,
+      }),
+    );
+
+    await saveProviders(normalized);
+  }
+
+  function openServiceAreaEditor(
+    serviceArea: ServiceArea,
+  ) {
+    setEditingServiceArea({
+      ...serviceArea,
+    });
+  }
+
+  function addServiceArea() {
+    const maxOrder =
+      currentConfiguration.serviceAreas.reduce(
+        (max, serviceArea) =>
+          Math.max(
+            max,
+            serviceArea.displayOrder,
+          ),
+        -1,
+      );
+
+    const id =
+      `service-area-${crypto.randomUUID()}`;
+
+    setEditingServiceArea({
+      id,
+      name: "",
+      active: true,
+      displayOrder: maxOrder + 1,
+    });
+
+    setSection("serviceAreas");
+  }
+
+  function closeServiceAreaEditor() {
+    setEditingServiceArea(null);
+  }
+
+  async function saveServiceAreaEdit() {
+    if (!editingServiceArea) {
+      return;
+    }
+
+    const name =
+      editingServiceArea.name.trim();
+
+    if (!name) {
+      setError(
+        "Please enter a service area name.",
+      );
+      return;
+    }
+
+    const savedServiceArea: ServiceArea = {
+      ...editingServiceArea,
+      name,
+    };
+
+    const exists =
+      currentConfiguration.serviceAreas.some(
+        (serviceArea) =>
+          serviceArea.id ===
+          savedServiceArea.id,
+      );
+
+    const serviceAreas = exists
+      ? currentConfiguration.serviceAreas.map(
+          (serviceArea) =>
+            serviceArea.id ===
+            savedServiceArea.id
+              ? savedServiceArea
+              : serviceArea,
+        )
+      : [
+          ...currentConfiguration.serviceAreas,
+          savedServiceArea,
+        ];
+
+    const success =
+      await saveServiceAreas(
+        serviceAreas,
+      );
+
+    if (success) {
+      closeServiceAreaEditor();
+    }
+  }
+
+  async function deleteServiceArea(
+    id: string,
+  ) {
+    const serviceArea =
+      currentConfiguration.serviceAreas.find(
+        (item) => item.id === id,
+      );
+
+    if (!serviceArea) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Delete "${serviceArea.name}"?`,
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    const remaining =
+      currentConfiguration.serviceAreas
+        .filter((item) => item.id !== id)
+        .map((item, index) => ({
+          ...item,
+          displayOrder: index,
+        }));
+
+    const success =
+      await saveServiceAreas(
+        remaining,
+      );
+
+    if (
+      success &&
+      editingServiceArea?.id === id
+    ) {
+      closeServiceAreaEditor();
+    }
+  }
+
+  async function toggleServiceAreaActive(
+    serviceAreaId: string,
+  ) {
+    const serviceAreas =
+      currentConfiguration.serviceAreas.map(
+        (serviceArea) =>
+          serviceArea.id === serviceAreaId
+            ? {
+                ...serviceArea,
+                active: !serviceArea.active,
+              }
+            : serviceArea,
+      );
+
+    await saveServiceAreas(
+      serviceAreas,
+    );
+  }
+
+  async function moveServiceArea(
+    serviceAreaId: string,
+    direction: -1 | 1,
+  ) {
+    const serviceAreas =
+      sortServiceAreas(
+        currentConfiguration.serviceAreas,
       );
 
     const index =
-      providers.findIndex(
-        (provider) =>
-          provider.id === providerId,
+      serviceAreas.findIndex(
+        (serviceArea) =>
+          serviceArea.id ===
+          serviceAreaId,
       );
 
-    const targetIndex =
-      index + direction;
+    const targetIndex = index + direction;
 
     if (
       index < 0 ||
       targetIndex < 0 ||
       targetIndex >=
-        providers.length
+        serviceAreas.length
     ) {
       return;
     }
 
-    const reordered = [
-      ...providers,
-    ];
+    const reordered = [...serviceAreas];
 
-    [
-      reordered[index],
-      reordered[targetIndex],
-    ] = [
-      reordered[targetIndex],
-      reordered[index],
-    ];
+    [reordered[index], reordered[targetIndex]] =
+      [
+        reordered[targetIndex],
+        reordered[index],
+      ];
 
     const normalized =
       reordered.map(
-        (
-          provider,
-          position,
-        ) => ({
-          ...provider,
-          displayOrder:
-            position,
+        (serviceArea, position) => ({
+          ...serviceArea,
+          displayOrder: position,
         }),
       );
 
-    await saveProviders(
+    await saveServiceAreas(
       normalized,
     );
   }
@@ -792,9 +1005,7 @@ export default function ConfigPage() {
     providerId: string,
   ) {
     const existing =
-      availabilityRowsFor(
-        providerId,
-      )[0];
+      availabilityRowsFor(providerId)[0];
 
     setAvailabilityDraft({
       date:
@@ -824,9 +1035,7 @@ export default function ConfigPage() {
     providerId: string,
   ) {
     if (!availabilityDraft.date) {
-      setError(
-        "Please choose a date.",
-      );
+      setError("Please choose a date.");
       return;
     }
 
@@ -884,7 +1093,8 @@ export default function ConfigPage() {
             ),
           }
         : {
-            id: `availability-${crypto.randomUUID()}`,
+            id:
+              `availability-${crypto.randomUUID()}`,
             providerId,
             date:
               availabilityDraft.date,
@@ -912,8 +1122,7 @@ export default function ConfigPage() {
           const withoutSaved =
             current.filter(
               (item) =>
-                item.id !==
-                saved.id,
+                item.id !== saved.id,
             );
 
           return [
@@ -956,8 +1165,7 @@ export default function ConfigPage() {
     const availability =
       providerAvailability.find(
         (item) =>
-          item.id ===
-          row.availabilityId,
+          item.id === row.availabilityId,
       );
 
     if (!availability) {
@@ -1014,16 +1222,13 @@ export default function ConfigPage() {
       return;
     }
 
-    const updated: ProviderAvailability =
-      {
+    const updated:
+      ProviderAvailability = {
         ...availability,
         blocks:
           availability.blocks
             .map(
-              (
-                block,
-                index,
-              ) =>
+              (block, index) =>
                 index ===
                 row.blockIndex
                   ? updatedBlock
@@ -1049,8 +1254,7 @@ export default function ConfigPage() {
         (current) =>
           current.map(
             (item) =>
-              item.id ===
-              saved.id
+              item.id === saved.id
                 ? saved
                 : item,
           ),
@@ -1081,8 +1285,7 @@ export default function ConfigPage() {
     const availability =
       providerAvailability.find(
         (item) =>
-          item.id ===
-          row.availabilityId,
+          item.id === row.availabilityId,
       );
 
     if (!availability) {
@@ -1111,8 +1314,8 @@ export default function ConfigPage() {
             ),
         );
       } else {
-        const updated: ProviderAvailability =
-          {
+        const updated:
+          ProviderAvailability = {
             ...availability,
             blocks:
               availability.blocks.filter(
@@ -1173,8 +1376,8 @@ export default function ConfigPage() {
 
           <p>
             Manage services, providers,
-            and the hours they are
-            available to serve.
+            service areas, and provider
+            availability.
           </p>
         </div>
 
@@ -1186,6 +1389,7 @@ export default function ConfigPage() {
       <div className="config-layout">
         <aside className="config-nav">
           <button
+            type="button"
             className={
               section === "services"
                 ? "active"
@@ -1206,6 +1410,7 @@ export default function ConfigPage() {
           </button>
 
           <button
+            type="button"
             className={
               section === "providers"
                 ? "active"
@@ -1222,6 +1427,26 @@ export default function ConfigPage() {
             <span>
               People and
               availability
+            </span>
+          </button>
+
+          <button
+            type="button"
+            className={
+              section === "serviceAreas"
+                ? "active"
+                : ""
+            }
+            onClick={() =>
+              setSection("serviceAreas")
+            }
+          >
+            <strong>
+              Service Areas
+            </strong>
+
+            <span>
+              Scheduler columns
             </span>
           </button>
         </aside>
@@ -1258,9 +1483,7 @@ export default function ConfigPage() {
             <>
               <div className="admin-panel-header">
                 <div>
-                  <h2>
-                    Services
-                  </h2>
+                  <h2>Services</h2>
 
                   <p>
                     These are the
@@ -1272,10 +1495,9 @@ export default function ConfigPage() {
                 </div>
 
                 <button
+                  type="button"
                   className="primary-button"
-                  onClick={
-                    addService
-                  }
+                  onClick={addService}
                   disabled={saving}
                 >
                   + Add service
@@ -1293,9 +1515,7 @@ export default function ConfigPage() {
                     >
                       <div>
                         <strong>
-                          {
-                            service.name
-                          }
+                          {service.name}
                         </strong>
 
                         <span>
@@ -1309,29 +1529,27 @@ export default function ConfigPage() {
 
                       <div className="admin-row-actions">
                         <button
+                          type="button"
                           className="secondary-button"
                           onClick={() =>
                             openServiceEditor(
                               service,
                             )
                           }
-                          disabled={
-                            saving
-                          }
+                          disabled={saving}
                         >
                           Edit
                         </button>
 
                         <button
+                          type="button"
                           className="danger-button"
                           onClick={() =>
                             void deleteService(
                               service.id,
                             )
                           }
-                          disabled={
-                            saving
-                          }
+                          disabled={saving}
                         >
                           Delete
                         </button>
@@ -1341,8 +1559,7 @@ export default function ConfigPage() {
                 )}
 
                 {!currentConfiguration
-                  .services
-                  .length && (
+                  .services.length && (
                   <div className="availability-empty">
                     No services
                     configured yet.
@@ -1371,6 +1588,7 @@ export default function ConfigPage() {
                 </div>
 
                 <button
+                  type="button"
                   className="primary-button"
                   onClick={
                     addProvider
@@ -1399,6 +1617,11 @@ export default function ConfigPage() {
                         provider.id,
                       );
 
+                    const orderedProviders =
+                      sortProviders(
+                        currentConfiguration.providers,
+                      );
+
                     return (
                       <div
                         className={`provider-admin-card ${
@@ -1406,7 +1629,9 @@ export default function ConfigPage() {
                             ? "expanded"
                             : ""
                         }`}
-                        key={provider.id}
+                        key={
+                          provider.id
+                        }
                       >
                         <div className="provider-admin-heading">
                           <button
@@ -1440,18 +1665,21 @@ export default function ConfigPage() {
                                     .serviceIds
                                     .length
                                 }{" "}
-                                {provider
-                                  .serviceIds
-                                  .length ===
-                                1
-                                  ? "service"
-                                  : "services"}
+                                {
+                                  provider
+                                    .serviceIds
+                                    .length ===
+                                  1
+                                    ? "service"
+                                    : "services"
+                                }
                               </small>
                             </span>
                           </button>
 
                           <div className="provider-card-actions">
                             <button
+                              type="button"
                               className="icon-order-button"
                               disabled={
                                 index ===
@@ -1470,12 +1698,11 @@ export default function ConfigPage() {
                             </button>
 
                             <button
+                              type="button"
                               className="icon-order-button"
                               disabled={
                                 index ===
-                                  currentConfiguration
-                                    .providers
-                                    .length -
+                                  orderedProviders.length -
                                     1 ||
                                 saving
                               }
@@ -1491,6 +1718,7 @@ export default function ConfigPage() {
                             </button>
 
                             <button
+                              type="button"
                               className="secondary-button"
                               onClick={() =>
                                 openProviderEditor(
@@ -1509,36 +1737,34 @@ export default function ConfigPage() {
                         {!expanded && (
                           <div className="provider-collapsed-summary">
                             <div className="provider-service-chips compact">
-                              {provider
-                                .serviceIds
-                                .length
-                                ? provider.serviceIds.map(
-                                    (
-                                      id,
-                                    ) => (
-                                      <span
-                                        key={
-                                          id
-                                        }
-                                      >
-                                        {currentConfiguration.services.find(
-                                          (
-                                            service,
-                                          ) =>
-                                            service.id ===
-                                            id,
-                                        )?.name ??
-                                          id}
-                                      </span>
-                                    ),
-                                  )
-                                : (
-                                  <em>
-                                    No
-                                    services
-                                    assigned
-                                  </em>
-                                )}
+                              {provider.serviceIds.length ? (
+                                provider.serviceIds.map(
+                                  (
+                                    id,
+                                  ) => (
+                                    <span
+                                      key={
+                                        id
+                                      }
+                                    >
+                                      {currentConfiguration.services.find(
+                                        (
+                                          service,
+                                        ) =>
+                                          service.id ===
+                                          id,
+                                      )?.name ??
+                                        id}
+                                    </span>
+                                  ),
+                                )
+                              ) : (
+                                <em>
+                                  No
+                                  services
+                                  assigned
+                                </em>
+                              )}
                             </div>
 
                             <span className="availability-summary">
@@ -1546,10 +1772,12 @@ export default function ConfigPage() {
                                 availability.length
                               }{" "}
                               availability{" "}
-                              {availability.length ===
-                              1
-                                ? "block"
-                                : "blocks"}
+                              {
+                                availability.length ===
+                                1
+                                  ? "block"
+                                  : "blocks"
+                              }
                             </span>
                           </div>
                         )}
@@ -1557,36 +1785,34 @@ export default function ConfigPage() {
                         {expanded && (
                           <div className="provider-expanded-content">
                             <div className="provider-service-chips">
-                              {provider
-                                .serviceIds
-                                .length
-                                ? provider.serviceIds.map(
-                                    (
-                                      id,
-                                    ) => (
-                                      <span
-                                        key={
-                                          id
-                                        }
-                                      >
-                                        {currentConfiguration.services.find(
-                                          (
-                                            service,
-                                          ) =>
-                                            service.id ===
-                                            id,
-                                        )?.name ??
-                                          id}
-                                      </span>
-                                    ),
-                                  )
-                                : (
-                                  <em>
-                                    No
-                                    services
-                                    assigned
-                                  </em>
-                                )}
+                              {provider.serviceIds.length ? (
+                                provider.serviceIds.map(
+                                  (
+                                    id,
+                                  ) => (
+                                    <span
+                                      key={
+                                        id
+                                      }
+                                    >
+                                      {currentConfiguration.services.find(
+                                        (
+                                          service,
+                                        ) =>
+                                          service.id ===
+                                          id,
+                                      )?.name ??
+                                        id}
+                                    </span>
+                                  ),
+                                )
+                              ) : (
+                                <em>
+                                  No
+                                  services
+                                  assigned
+                                </em>
+                              )}
                             </div>
 
                             <div className="availability-header">
@@ -1606,6 +1832,7 @@ export default function ConfigPage() {
                               </div>
 
                               <button
+                                type="button"
                                 className="secondary-button"
                                 onClick={() =>
                                   beginAddAvailability(
@@ -1699,6 +1926,7 @@ export default function ConfigPage() {
                                       />
 
                                       <button
+                                        type="button"
                                         className="danger-button"
                                         onClick={() =>
                                           void removeAvailability(
@@ -1720,7 +1948,8 @@ export default function ConfigPage() {
                                 addingAvailabilityFor !==
                                   provider.id && (
                                   <div className="availability-empty">
-                                    No availability
+                                    No
+                                    availability
                                     configured
                                     yet. Add
                                     the first
@@ -1832,6 +2061,7 @@ export default function ConfigPage() {
 
                                 <div className="availability-add-actions">
                                   <button
+                                    type="button"
                                     className="secondary-button"
                                     onClick={
                                       cancelAddAvailability
@@ -1841,6 +2071,7 @@ export default function ConfigPage() {
                                   </button>
 
                                   <button
+                                    type="button"
                                     className="primary-button"
                                     onClick={() =>
                                       void addAvailability(
@@ -1858,18 +2089,12 @@ export default function ConfigPage() {
                             )}
 
                             <p className="availability-note">
-                              Example: Aug
-                              21,
-                              8:00
-                              AM–12:00
-                              PM and
-                              Aug 21,
-                              1:00
-                              PM–5:00
-                              PM can be
-                              entered as
-                              two
-                              separate
+                              Example: Aug 21,
+                              8:00 AM–12:00
+                              PM and Aug 21,
+                              1:00 PM–5:00 PM
+                              can be entered as
+                              two separate
                               blocks.
                             </p>
                           </div>
@@ -1880,10 +2105,316 @@ export default function ConfigPage() {
                 )}
 
                 {!currentConfiguration
-                  .providers
-                  .length && (
+                  .providers.length && (
                   <div className="availability-empty">
                     No providers
+                    configured yet.
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
+          {section === "serviceAreas" && (
+            <>
+              <div className="service-area-assignment-section">
+                <div className="service-area-assignment-header">
+                  <div>
+                    <h3>Daily provider assignments</h3>
+
+                    <p>
+                      Choose a clinic date, then assign the
+                      provider working in each service area.
+                      Assignments apply only to that date.
+                    </p>
+                  </div>
+
+                  <label
+                    className="assignment-date-label"
+                    htmlFor="assignment-date"
+                  >
+                    Clinic date
+
+                    <input
+                      id="assignment-date"
+                      type="date"
+                      value={assignmentDate}
+                      onChange={(event) =>
+                        setAssignmentDate(
+                          event.target.value,
+                        )
+                      }
+                      disabled={
+                        assignmentsLoading ||
+                        saving
+                      }
+                    />
+                  </label>
+                </div>
+
+                {assignmentsLoading ? (
+                  <div className="availability-empty">
+                    Loading assignments…
+                  </div>
+                ) : (
+                  <div className="service-area-assignment-list">
+                    {sortServiceAreas(
+                      currentConfiguration.serviceAreas,
+                    ).map((serviceArea) => {
+                      const assignment =
+                        assignmentForServiceArea(
+                          serviceArea.id,
+                        );
+
+                      const assignedProviderId =
+                        assignment?.providerId ?? "";
+
+                      const providerOptions =
+                        sortProviders(
+                          currentConfiguration.providers,
+                        ).filter(
+                          (provider) =>
+                            provider.active ||
+                            provider.id ===
+                              assignedProviderId,
+                        );
+
+                      const hasAvailability =
+                        assignedProviderId
+                          ? providerHasAvailability(
+                              assignedProviderId,
+                              assignmentDate,
+                            )
+                          : false;
+
+                      return (
+                        <div
+                          className={`service-area-assignment-row ${
+                            serviceArea.active
+                              ? ""
+                              : "inactive"
+                          }`}
+                          key={serviceArea.id}
+                        >
+                          <div className="service-area-assignment-name">
+                            <strong>
+                              {serviceArea.name}
+                            </strong>
+
+                            <span>
+                              {serviceArea.active
+                                ? "Active service area"
+                                : "Inactive service area"}
+                            </span>
+                          </div>
+
+                          <div className="service-area-assignment-provider">
+                            <select
+                              value={
+                                assignedProviderId
+                              }
+                              onChange={(event) =>
+                                void changeServiceAreaAssignment(
+                                  serviceArea.id,
+                                  event.target.value,
+                                )
+                              }
+                              disabled={
+                                saving ||
+                                !serviceArea.active
+                              }
+                            >
+                              <option value="">
+                                Unassigned
+                              </option>
+
+                              {providerOptions.map(
+                                (provider) => (
+                                  <option
+                                    key={provider.id}
+                                    value={provider.id}
+                                  >
+                                    {provider.name}
+                                    {!provider.active
+                                      ? " (inactive)"
+                                      : ""}
+                                  </option>
+                                ),
+                              )}
+                            </select>
+
+                            {!assignedProviderId ? (
+                              <span className="assignment-status">
+                                No provider assigned
+                              </span>
+                            ) : hasAvailability ? (
+                              <span className="assignment-status configured">
+                                ✓ Availability configured
+                              </span>
+                            ) : (
+                              <span className="assignment-status warning">
+                                ⚠ No availability
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                    {!currentConfiguration.serviceAreas.length && (
+                      <div className="availability-empty">
+                        No service areas configured yet.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="admin-panel-header">
+                <div>
+                  <h2>
+                    Service Areas
+                  </h2>
+
+                  <p>
+                    These are the
+                    scheduling columns.
+                    A provider is
+                    assigned to a
+                    service area for
+                    each clinic date.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={
+                    addServiceArea
+                  }
+                  disabled={saving}
+                >
+                  + Add service area
+                </button>
+              </div>
+
+              <div className="admin-list">
+                {sortServiceAreas(
+                  currentConfiguration.serviceAreas,
+                ).map(
+                  (
+                    serviceArea,
+                    index,
+                    ordered,
+                  ) => (
+                    <div
+                      className="admin-list-row"
+                      key={
+                        serviceArea.id
+                      }
+                    >
+                      <div>
+                        <strong>
+                          {
+                            serviceArea.name
+                          }
+                        </strong>
+
+                        <span>
+                          {serviceArea.active
+                            ? "Active"
+                            : "Inactive"}
+                        </span>
+                      </div>
+
+                      <div className="admin-row-actions">
+                        <button
+                          type="button"
+                          className="icon-order-button"
+                          disabled={
+                            index ===
+                              0 ||
+                            saving
+                          }
+                          onClick={() =>
+                            void moveServiceArea(
+                              serviceArea.id,
+                              -1,
+                            )
+                          }
+                          aria-label={`Move ${serviceArea.name} up`}
+                        >
+                          ↑
+                        </button>
+
+                        <button
+                          type="button"
+                          className="icon-order-button"
+                          disabled={
+                            index ===
+                              ordered.length -
+                                1 ||
+                            saving
+                          }
+                          onClick={() =>
+                            void moveServiceArea(
+                              serviceArea.id,
+                              1,
+                            )
+                          }
+                          aria-label={`Move ${serviceArea.name} down`}
+                        >
+                          ↓
+                        </button>
+
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() =>
+                            void toggleServiceAreaActive(
+                              serviceArea.id,
+                            )
+                          }
+                          disabled={saving}
+                        >
+                          {serviceArea.active
+                            ? "Deactivate"
+                            : "Activate"}
+                        </button>
+
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() =>
+                            openServiceAreaEditor(
+                              serviceArea,
+                            )
+                          }
+                          disabled={saving}
+                        >
+                          Edit
+                        </button>
+
+                        <button
+                          type="button"
+                          className="danger-button"
+                          onClick={() =>
+                            void deleteServiceArea(
+                              serviceArea.id,
+                            )
+                          }
+                          disabled={saving}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  ),
+                )}
+
+                {!currentConfiguration
+                  .serviceAreas.length && (
+                  <div className="availability-empty">
+                    No service areas
                     configured yet.
                   </div>
                 )}
@@ -1903,7 +2434,7 @@ export default function ConfigPage() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="edit-service-title"
-            onClick={(event) =>
+            onMouseDown={(event) =>
               event.stopPropagation()
             }
           >
@@ -1922,9 +2453,8 @@ export default function ConfigPage() {
                 type="button"
                 className="config-modal-close"
                 aria-label="Close"
-                onClick={
-                  closeServiceEditor
-                }
+                onClick={closeServiceEditor}
+                disabled={saving}
               >
                 x
               </button>
@@ -1935,18 +2465,12 @@ export default function ConfigPage() {
 
               <input
                 autoFocus
-                value={
-                  editingService.name
-                }
+                value={editingService.name}
                 onChange={(event) =>
-                  setEditingService(
-                    {
-                      ...editingService,
-                      name:
-                        event.target
-                          .value,
-                    },
-                  )
+                  setEditingService({
+                    ...editingService,
+                    name: event.target.value,
+                  })
                 }
               />
             </label>
@@ -1965,8 +2489,7 @@ export default function ConfigPage() {
                 }
                 onChange={(event) =>
                   setServiceDurationDraft(
-                    event.target
-                      .value,
+                    event.target.value,
                   )
                 }
                 onBlur={
@@ -2019,7 +2542,7 @@ export default function ConfigPage() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="edit-provider-title"
-            onClick={(event) =>
+            onMouseDown={(event) =>
               event.stopPropagation()
             }
           >
@@ -2041,6 +2564,7 @@ export default function ConfigPage() {
                 onClick={
                   closeProviderEditor
                 }
+                disabled={saving}
               >
                 x
               </button>
@@ -2055,14 +2579,10 @@ export default function ConfigPage() {
                   editingProvider.name
                 }
                 onChange={(event) =>
-                  setEditingProvider(
-                    {
-                      ...editingProvider,
-                      name:
-                        event.target
-                          .value,
-                    },
-                  )
+                  setEditingProvider({
+                    ...editingProvider,
+                    name: event.target.value,
+                  })
                 }
               />
             </label>
@@ -2094,9 +2614,7 @@ export default function ConfigPage() {
                         }
                       />
 
-                      {
-                        service.name
-                      }
+                      {service.name}
                     </label>
                   ),
                 )}
@@ -2120,6 +2638,112 @@ export default function ConfigPage() {
                 className="primary-button"
                 onClick={() =>
                   void saveProviderEdit()
+                }
+                disabled={saving}
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editingServiceArea && (
+        <div
+          className="config-modal-backdrop"
+          role="presentation"
+        >
+          <div
+            className="config-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="edit-service-area-title"
+            onMouseDown={(event) =>
+              event.stopPropagation()
+            }
+          >
+            <div className="config-modal-header">
+              <div>
+                <span className="config-modal-eyebrow">
+                  Service Area
+                </span>
+
+                <h3 id="edit-service-area-title">
+                  {currentConfiguration.serviceAreas.some(
+                    (serviceArea) =>
+                      serviceArea.id ===
+                      editingServiceArea.id,
+                  )
+                    ? "Edit service area"
+                    : "Add service area"}
+                </h3>
+              </div>
+
+              <button
+                type="button"
+                className="config-modal-close"
+                aria-label="Close"
+                onClick={
+                  closeServiceAreaEditor
+                }
+                disabled={saving}
+              >
+                x
+              </button>
+            </div>
+
+            <label>
+              Name
+
+              <input
+                autoFocus
+                value={
+                  editingServiceArea.name
+                }
+                onChange={(event) =>
+                  setEditingServiceArea({
+                    ...editingServiceArea,
+                    name: event.target.value,
+                  })
+                }
+              />
+            </label>
+
+            <label className="config-checkbox-label">
+              <input
+                type="checkbox"
+                checked={
+                  editingServiceArea.active
+                }
+                onChange={(event) =>
+                  setEditingServiceArea({
+                    ...editingServiceArea,
+                    active:
+                      event.target.checked,
+                  })
+                }
+              />
+
+              <span>Active</span>
+            </label>
+
+            <div className="config-modal-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={
+                  closeServiceAreaEditor
+                }
+                disabled={saving}
+              >
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                className="primary-button"
+                onClick={() =>
+                  void saveServiceAreaEdit()
                 }
                 disabled={saving}
               >

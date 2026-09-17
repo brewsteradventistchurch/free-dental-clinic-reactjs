@@ -23,6 +23,49 @@ export type AppointmentRequest = {
   bookingStatus: string;
 };
 
+export type NextAvailableDateResponse = {
+  date: string;
+};
+
+export async function getNextAvailableDate(): Promise<string> {
+  const response = await fetch(
+    "/api/v1/schedule/next-available-date",
+    {
+      credentials: "include",
+    },
+  );
+
+  if (!response.ok) {
+    let message =
+      "Unable to determine the next available schedule date.";
+
+    try {
+      const body = await response.json();
+
+      if (
+        typeof body?.detail === "string" &&
+        body.detail.trim()
+      ) {
+        message = body.detail;
+      } else if (
+        typeof body?.message === "string" &&
+        body.message.trim()
+      ) {
+        message = body.message;
+      }
+    } catch {
+      // Keep fallback message.
+    }
+
+    throw new Error(message);
+  }
+
+  const result =
+    (await response.json()) as NextAvailableDateResponse;
+
+  return result.date;
+}
+
 let csrfToken: CsrfResponse | null = null;
 
 async function getCsrfToken(): Promise<CsrfResponse> {
@@ -168,11 +211,45 @@ export async function deleteAppointment(
 }
 
 export async function getProviderAvailability(
-  date: string,
+  date?: string,
 ): Promise<ProviderAvailability[]> {
-  return request<ProviderAvailability[]>(
-    `${PROVIDER_AVAILABILITY_URL}?date=${encodeURIComponent(date)}`,
+  const query = date
+    ? `?date=${encodeURIComponent(date)}`
+    : "";
+
+  const response = await fetch(
+    `/api/v1/provider-availability${query}`,
+    {
+      credentials: "include",
+    },
   );
+
+  if (!response.ok) {
+    let message =
+      "Unable to load provider availability.";
+
+    try {
+      const body = await response.json();
+
+      if (
+        typeof body?.detail === "string" &&
+        body.detail.trim()
+      ) {
+        message = body.detail;
+      } else if (
+        typeof body?.message === "string" &&
+        body.message.trim()
+      ) {
+        message = body.message;
+      }
+    } catch {
+      // Keep fallback message.
+    }
+
+    throw new Error(message);
+  }
+
+  return (await response.json()) as ProviderAvailability[];
 }
 
 export async function getProviderAvailabilityForProvider(
@@ -317,4 +394,40 @@ export async function deleteProviderAvailability(
 
     throw new Error(message);
   }
+}
+
+export async function saveServiceAreaAssignment(
+  serviceAreaId: string,
+  providerId: string,
+  date: string,
+): Promise<ServiceAreaAssignment> {
+  const query = new URLSearchParams({
+    serviceAreaId,
+    providerId,
+    date,
+  });
+
+  return writeRequest<ServiceAreaAssignment>(
+    `${SERVICE_AREA_ASSIGNMENTS_URL}?${query.toString()}`,
+    {
+      method: "PUT",
+    },
+  );
+}
+
+export async function deleteServiceAreaAssignment(
+  serviceAreaId: string,
+  date: string,
+): Promise<void> {
+  const query = new URLSearchParams({
+    serviceAreaId,
+    date,
+  });
+
+  await writeRequest<void>(
+    `${SERVICE_AREA_ASSIGNMENTS_URL}?${query.toString()}`,
+    {
+      method: "DELETE",
+    },
+  );
 }

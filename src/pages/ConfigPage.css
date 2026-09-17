@@ -418,6 +418,134 @@
     line-height: 1.45;
 }
 
+.service-area-assignment-section {
+    margin-bottom: 24px;
+    padding: 16px;
+    border: 1px solid #e2e8e4;
+    border-radius: 10px;
+    background: #fafcfa;
+}
+
+.service-area-assignment-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 20px;
+    margin-bottom: 14px;
+}
+
+.service-area-assignment-header h3 {
+    margin: 0 0 4px;
+    font-size: 14px;
+}
+
+.service-area-assignment-header p {
+    margin: 0;
+    max-width: 620px;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.assignment-date-label {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    flex: 0 0 auto;
+    color: #435148;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.assignment-date-label input {
+    width: 160px;
+    height: 36px;
+    padding: 0 8px;
+    border: 1px solid #d8dfda;
+    border-radius: 7px;
+    background: white;
+    color: var(--text);
+    font: inherit;
+    font-weight: 500;
+}
+
+.service-area-assignment-list {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+}
+
+.service-area-assignment-row {
+    display: grid;
+    grid-template-columns: minmax(180px, 1fr) minmax(280px, 1.25fr);
+    align-items: center;
+    gap: 18px;
+    padding: 11px 12px;
+    border: 1px solid #e5eae7;
+    border-radius: 8px;
+    background: white;
+}
+
+.service-area-assignment-row.inactive {
+    background: #f5f6f5;
+}
+
+.service-area-assignment-name strong,
+.service-area-assignment-name span {
+    display: block;
+}
+
+.service-area-assignment-name strong {
+    font-size: 13px;
+}
+
+.service-area-assignment-name span {
+    margin-top: 3px;
+    color: var(--muted);
+    font-size: 11px;
+}
+
+.service-area-assignment-provider {
+    display: grid;
+    grid-template-columns: minmax(150px, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+}
+
+.service-area-assignment-provider select {
+    width: 100%;
+    height: 36px;
+    padding: 0 9px;
+    border: 1px solid #d8dfda;
+    border-radius: 7px;
+    background: white;
+    color: var(--text);
+    font: inherit;
+    font-size: 12px;
+}
+
+.service-area-assignment-provider select:disabled {
+    background: #f2f4f2;
+    color: var(--muted);
+}
+
+.assignment-status {
+    min-width: 150px;
+    color: var(--muted);
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.assignment-status.configured {
+    color: var(--green);
+    font-weight: 700;
+}
+
+.assignment-status.warning {
+    color: #96702e;
+    font-weight: 700;
+}
+
 .admin-reset {
     margin-top: 22px;
     padding-top: 14px;
@@ -553,6 +681,27 @@
     border-top: 1px solid #edf0ee;
 }
 
+.config-modal > label.config-checkbox-label {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 15px;
+    cursor: pointer;
+}
+
+.config-modal > label.config-checkbox-label input[type="checkbox"] {
+    width: 17px;
+    height: 17px;
+    margin: 0;
+    flex: 0 0 auto;
+    accent-color: var(--green);
+}
+
+.config-modal > label.config-checkbox-label span {
+    display: block;
+}
+
 @media (max-width: 900px) {
     .config-layout {
         grid-template-columns: 1fr;
@@ -578,5 +727,30 @@
 
     .availability-add-editor>div:first-child {
         grid-column: 1 / -1;
+    }
+
+    .service-area-assignment-header {
+        flex-direction: column;
+    }
+
+    .assignment-date-label {
+        width: 100%;
+    }
+
+    .assignment-date-label input {
+        width: 100%;
+    }
+
+    .service-area-assignment-row {
+        grid-template-columns: 1fr;
+        gap: 10px;
+    }
+
+    .service-area-assignment-provider {
+        grid-template-columns: 1fr;
+    }
+
+    .assignment-status {
+        min-width: 0;
     }
 }

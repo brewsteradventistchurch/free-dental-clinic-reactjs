@@ -2,6 +2,7 @@ import type {
   ClinicConfiguration,
   Provider,
   Service,
+  ServiceArea,
 } from "../schedule/types";
 
 const CONFIGURATION_URL = "/api/v1/configuration";
@@ -120,6 +121,18 @@ export async function updateProviders(
     {
       method: "PUT",
       body: JSON.stringify(providers),
+    },
+  );
+}
+
+export async function updateServiceAreas(
+  serviceAreas: ServiceArea[],
+): Promise<ClinicConfiguration> {
+  return writeRequest<ClinicConfiguration>(
+    `${CONFIGURATION_URL}/service-areas`,
+    {
+      method: "PUT",
+      body: JSON.stringify(serviceAreas),
     },
   );
 }

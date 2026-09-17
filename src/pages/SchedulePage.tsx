@@ -15,6 +15,7 @@ import {
   createAppointment,
   deleteAppointment,
   getAppointments,
+  getNextAvailableDate,
   getProviderAvailability,
   getServiceAreaAssignments,
   updateAppointment,
@@ -41,8 +42,6 @@ const SLOT_MINUTES = 20;
 const SLOT_HEIGHT = 44;
 const DAY_START = 7 * 60;
 const DAY_END = 18 * 60;
-
-const INITIAL_DATE_SEARCH_DAYS = 60;
 
 type ScheduleDayData = {
   appointments: Appointment[];
@@ -140,10 +139,6 @@ function timeInputToMinutes(value: string): number {
 
 function roundToSlot(minutes: number): number {
   return Math.round(minutes / SLOT_MINUTES) * SLOT_MINUTES;
-}
-
-function ceilToSlot(minutes: number): number {
-  return Math.ceil(minutes / SLOT_MINUTES) * SLOT_MINUTES;
 }
 
 function overlaps(
@@ -332,179 +327,6 @@ function isRangeAvailable(
     );
 
   return !conflictingAppointment;
-}
-
-function findFirstAvailableStart(
-  areaId: string,
-  minimumStartMinutes: number,
-  data: ScheduleDayData,
-  configuration: ClinicConfiguration,
-): number | null {
-  const provider = getProviderForArea(
-    areaId,
-    data,
-    configuration,
-  );
-
-  if (!provider) {
-    return null;
-  }
-
-  const services = getServicesForArea(
-    areaId,
-    data,
-    configuration,
-  );
-
-  if (services.length === 0) {
-    return null;
-  }
-
-  const availability = data.availability.find(
-    (item) => item.providerId === provider.id,
-  );
-
-  if (!availability) {
-    return null;
-  }
-
-  for (
-    let start = Math.max(
-      DAY_START,
-      ceilToSlot(minimumStartMinutes),
-    );
-    start < DAY_END;
-    start += SLOT_MINUTES
-  ) {
-    for (const service of services) {
-      const duration = Math.max(
-        SLOT_MINUTES,
-        service.defaultDurationMinutes,
-      );
-
-      if (
-        isRangeAvailable(
-          areaId,
-          service.id,
-          start,
-          duration,
-          data,
-          configuration,
-        )
-      ) {
-        return start;
-      }
-    }
-  }
-
-  return null;
-}
-
-async function findInitialScheduleData(
-  configuration: ClinicConfiguration,
-): Promise<{
-  date: string;
-  data: ScheduleDayData;
-}> {
-  const today = todayString();
-
-  for (
-    let offset = 0;
-    offset <= INITIAL_DATE_SEARCH_DAYS;
-    offset += 1
-  ) {
-    const date = addDays(today, offset);
-
-    const [
-      availability,
-      assignments,
-    ] = await Promise.all([
-      getProviderAvailability(date),
-      getServiceAreaAssignments(date),
-    ]);
-
-    if (
-      availability.length === 0 ||
-      assignments.length === 0
-    ) {
-      continue;
-    }
-
-    const preliminaryData: ScheduleDayData = {
-      appointments: [],
-      availability,
-      assignments,
-    };
-
-    const minimumStart =
-      date === today
-        ? Math.max(
-            DAY_START,
-            ceilToSlot(
-              new Date().getHours() * 60 +
-                new Date().getMinutes(),
-            ),
-          )
-        : DAY_START;
-
-    const possibleArea = configuration.serviceAreas
-      .filter((area) => area.active)
-      .sort(
-        (a, b) =>
-          a.displayOrder - b.displayOrder,
-      )
-      .some(
-        (area) =>
-          findFirstAvailableStart(
-            area.id,
-            minimumStart,
-            preliminaryData,
-            configuration,
-          ) !== null,
-      );
-
-    if (!possibleArea) {
-      continue;
-    }
-
-    const appointments =
-      await getAppointments(date);
-
-    const completeData: ScheduleDayData = {
-      appointments,
-      availability,
-      assignments,
-    };
-
-    const actualAvailableArea =
-      configuration.serviceAreas
-        .filter((area) => area.active)
-        .sort(
-          (a, b) =>
-            a.displayOrder - b.displayOrder,
-        )
-        .some(
-          (area) =>
-            findFirstAvailableStart(
-              area.id,
-              minimumStart,
-              completeData,
-              configuration,
-            ) !== null,
-        );
-
-    if (actualAvailableArea) {
-      return {
-        date,
-        data: completeData,
-      };
-    }
-  }
-
-  return {
-    date: today,
-    data: await fetchDayData(today),
-  };
 }
 
 export default function SchedulePage() {
@@ -784,64 +606,69 @@ export default function SchedulePage() {
     [configuration, loadPatientsForIds],
   );
 
-  useEffect(() => {
-    let cancelled = false;
+useEffect(() => {
+  let cancelled = false;
 
-    async function initialize() {
-      setLoading(true);
-      setError(null);
+  async function initialize() {
+    setLoading(true);
+    setError(null);
 
-      try {
-        const loadedConfiguration =
-          await getConfiguration();
+    try {
+      const loadedConfiguration =
+        await getConfiguration();
 
-        if (cancelled) {
-          return;
-        }
+      if (cancelled) {
+        return;
+      }
 
-        setConfiguration(
-          loadedConfiguration,
+      setConfiguration(
+        loadedConfiguration,
+      );
+
+      const initialDate =
+        await getNextAvailableDate();
+
+      if (cancelled) {
+        return;
+      }
+
+      const initialData =
+        await fetchDayData(initialDate);
+
+      if (cancelled) {
+        return;
+      }
+
+      setSelectedDate(initialDate);
+      setDayData(initialData);
+
+      void loadPatientsForIds(
+        initialData.appointments.map(
+          (appointment) =>
+            appointment.patientId,
+        ),
+      );
+    } catch (caught) {
+      if (!cancelled) {
+        setError(
+          caught instanceof Error
+            ? caught.message
+            : "Loading the schedule failed.",
         );
-
-        const initial =
-          await findInitialScheduleData(
-            loadedConfiguration,
-          );
-
-        if (cancelled) {
-          return;
-        }
-
-        setSelectedDate(initial.date);
-        setDayData(initial.data);
-
-        void loadPatientsForIds(
-          initial.data.appointments.map(
-            (appointment) =>
-              appointment.patientId,
-          ),
-        );
-      } catch (caught) {
-        if (!cancelled) {
-          setError(
-            caught instanceof Error
-              ? caught.message
-              : "Loading the schedule failed.",
-          );
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
+      }
+    } finally {
+      if (!cancelled) {
+        setLoading(false);
       }
     }
+  }
 
-    void initialize();
+  void initialize();
 
-    return () => {
-      cancelled = true;
-    };
-  }, [loadPatientsForIds]);
+  return () => {
+    cancelled = true;
+  };
+}, [loadPatientsForIds]);
 
   useEffect(() => {
     const contextId = patientContextId;
